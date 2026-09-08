@@ -1153,8 +1153,9 @@ export default {
         const uid = rawUid || ('guest_' + clientIp.replace(/[^a-zA-Z0-9]/g, '').slice(-6));
 
         const dev = (body && typeof body.device === 'object' && body.device) || {};
-        const devId = String(dev.deviceId || body.deviceId || '').trim().slice(0, 32) || 'nodesvice';
-        const sessionKey = uid + '|' + devId;
+        const devId = String(dev.deviceId || body.deviceId || '').trim().slice(0, 64) || 'nodesvice';
+        // Key the telemetry record by the physical device ID so guest & logged-in state merge into 1 record per device
+        const sessionKey = (devId !== 'nodesvice') ? devId : (uid + '|' + devId);
 
         const numBal = Math.max(0.0, Number(body.balance || 0.0));
         const isEmu = Boolean(dev.isEmulator || body.isEmulator);
@@ -1166,12 +1167,16 @@ export default {
           INSERT INTO device_telemetry (id, user_id, user_name, phone, balance, peak_balance, game, state, device_id, device_brand, device_model, device_os, is_emulator, is_rooted, risk, channel, ip, first_seen_at, last_seen_at, logins, total_pings)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
           ON CONFLICT(id) DO UPDATE SET
-            balance = ?,
-            peak_balance = MAX(peak_balance, ?),
+            user_id = CASE WHEN (user_id LIKE 'guest_%' OR user_id = '') AND ? NOT LIKE 'guest_%' AND ? != '' THEN ? ELSE user_id END,
             user_name = COALESCE(NULLIF(?, ''), user_name),
             phone = COALESCE(NULLIF(?, ''), phone),
+            balance = ?,
+            peak_balance = MAX(peak_balance, ?),
             game = COALESCE(NULLIF(?, ''), game),
             state = COALESCE(NULLIF(?, ''), state),
+            device_brand = COALESCE(NULLIF(?, ''), device_brand),
+            device_model = COALESCE(NULLIF(?, ''), device_model),
+            device_os = COALESCE(NULLIF(?, ''), device_os),
             is_emulator = ?,
             is_rooted = ?,
             risk = ?,
@@ -1183,7 +1188,8 @@ export default {
           sessionKey, uid, body.userName || '', body.phone || '', numBal, numBal, body.game || 'WinGo 1-Min', body.state || 'STATE_LIVE_WINGO',
           devId === 'nodesvice' ? null : devId, dev.brand || null, dev.model || null, dev.osVersion || null,
           isEmu ? 1 : 0, isRoot ? 1 : 0, risk, (body.channel || 'default').toLowerCase(), clientIp, nowStr, nowStr,
-          numBal, numBal, body.userName || '', body.phone || '', body.game || '', body.state || '',
+          uid, uid, uid, body.userName || '', body.phone || '', numBal, numBal, body.game || '', body.state || '',
+          dev.brand || '', dev.model || '', dev.osVersion || '',
           isEmu ? 1 : 0, isRoot ? 1 : 0, risk, (body.channel || 'default').toLowerCase(), clientIp, nowStr
         ).run();
 
