@@ -1,5 +1,5 @@
-// Cloudflare Worker: User State Authorization API with Live ShreeWin Integration
-// Server-authoritative Identity, Live ShreeWin Sync, Wallet Balance, Game Leases & Configurable Game URL
+// Cloudflare Worker: User State Authorization API (Authoritative Gateway)
+// Server-authoritative Identity, Provider Integration, Dynamic Wallet Sync, Game Leases & Configurable Game URLs
 
 export default {
   async fetch(request, env) {
@@ -38,11 +38,12 @@ export default {
     const jwtSecret = env.JWT_SECRET_KEY || 'default-secret-key-cloudflare-2026';
     const pageStaleSec = parseInt(env.PAGE_STALE_SECONDS || '120', 10);
     const heartbeatGraceSec = parseInt(env.GAME_HEARTBEAT_GRACE_SECONDS || '90', 10);
-    const shreewinApiUrl = env.SHREEWIN_API_URL || 'https://api.shreewinapi.com';
+    const providerApiUrl = env.PROVIDER_API_URL || env.SHREEWIN_API_URL || 'https://api.shreewinapi.com';
+    const providerOrigin = env.PROVIDER_ORIGIN || 'https://shreewin39.com';
     const defaultGameBaseUrl = env.GAME_BASE_URL || 'https://h5.ar-lottery01.com';
 
-    // Sign payload for ShreeWin API
-    function shreewinSign(data) {
+    // Sign payload for upstream client provider API
+    function signProviderPayload(data) {
       const t = { ...data };
       delete t.signature;
       delete t.timestamp;
@@ -62,14 +63,14 @@ export default {
       return t;
     }
 
-    // Call live ShreeWin API
-    async function callShreewin(endpoint, data, token = null) {
-      const signed = shreewinSign(data);
+    // Call upstream client provider API
+    async function callProviderApi(endpoint, data, token = null) {
+      const signed = signProviderPayload(data);
       const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || '103.44.118.79';
       const headers = {
         'User-Agent': request.headers.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Origin': 'https://shreewin39.com',
-        'Referer': 'https://shreewin39.com/',
+        'Origin': providerOrigin,
+        'Referer': providerOrigin.endsWith('/') ? providerOrigin : `${providerOrigin}/`,
         'Content-Type': 'application/json',
         'AR-REAL-IP': clientIp,
         'X-Real-IP': clientIp,
@@ -78,7 +79,7 @@ export default {
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      const resp = await fetch(`${shreewinApiUrl}${endpoint}`, {
+      const resp = await fetch(`${providerApiUrl}${endpoint}`, {
         method: 'POST',
         headers,
         body: JSON.stringify(signed),
@@ -125,7 +126,7 @@ export default {
         return json({
           status: 'ok',
           environment: env.ENVIRONMENT || 'production',
-          shreewin_api_url: shreewinApiUrl,
+          provider_api_url: providerApiUrl,
           game_base_url: defaultGameBaseUrl,
         });
       }
@@ -176,7 +177,7 @@ export default {
       }
 
       // ----------------------------------------------------
-      // 3. Login (with Live ShreeWin Sync & Proxy)
+      // 3. Login (with Upstream Client Provider Sync & Proxy)
       // ----------------------------------------------------
       if (method === 'POST' && path === '/auth/login') {
         const body = await request.json().catch(() => ({}));
@@ -184,61 +185,64 @@ export default {
         const password = body.password || '';
         const device_id = body.device_id || 'mobile-device';
 
-        // Format phone for ShreeWin (e.g. 917666783464)
+        // Format identifier for upstream provider if numeric phone
         const digitsOnly = identifier.replace(/\D/g, '');
-        const phoneWith91 = digitsOnly.startsWith('91') ? digitsOnly : `91${digitsOnly}`;
+        const phoneFormatted = digitsOnly.length === 10 ? `91${digitsOnly}` : digitsOnly;
 
-        let shreewinUser = null;
-        let shreewinWallets = null;
+        let providerUser = null;
+        let providerWallets = null;
         let totalBalance = 0.0;
 
-        // Try live ShreeWin authentication
+        let lastProvError = null;
+        let provResp = null;
+
+        // Try upstream provider authentication
         try {
-          const swResp = await callShreewin('/api/webapi/Login', {
-            username: phoneWith91,
+          provResp = await callProviderApi('/api/webapi/Login', {
+            username: phoneFormatted || identifier,
             pwd: password,
             logintype: 'mobile',
             phonetype: 'Android',
             deviceId: randomHex(16),
           });
 
-          if (swResp.code === 0 && swResp.data) {
-            shreewinUser = swResp.data;
-            // Fetch live wallet balances across all providers
-            const walletResp = await callShreewin('/api/webapi/GetAllwallets', {}, shreewinUser.token);
-            if (walletResp.code === 0 && walletResp.data && walletResp.data.thidGameBalanceList) {
-              shreewinWallets = walletResp.data.thidGameBalanceList;
-              for (const w of shreewinWallets) {
+          if (provResp && provResp.code === 0 && provResp.data) {
+            providerUser = provResp.data;
+            // Fetch live wallet balances across all provider games
+            const walletResp = await callProviderApi('/api/webapi/GetAllwallets', {}, providerUser.token);
+            if (walletResp && walletResp.code === 0 && walletResp.data && walletResp.data.thidGameBalanceList) {
+              providerWallets = walletResp.data.thidGameBalanceList;
+              for (const w of providerWallets) {
                 totalBalance += Number(w.balance || 0);
               }
               totalBalance = Math.round(totalBalance * 100) / 100;
             }
           }
         } catch (e) {
-          // Fallback if live shreewin is unreachable
+          lastProvError = String(e && e.message ? e.message : e);
         }
 
         // Check local DB
         let user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ? OR identifier = ?')
-          .bind(identifier.toLowerCase(), phoneWith91).first();
+          .bind(identifier.toLowerCase(), phoneFormatted || identifier).first();
 
         const now = new Date();
         const nowStr = now.toISOString();
 
-        if (shreewinUser) {
-          // Account verified live on ShreeWin!
-          const realUid = Number(shreewinUser.UserId) || null;
-          const nickName = shreewinUser.NickName || '';
+        if (providerUser) {
+          // Account verified live on upstream provider!
+          const realUid = Number(providerUser.UserId) || null;
+          const nickName = providerUser.NickName || '';
 
           if (!user) {
             const hashed = await hashPassword(password);
             await env.DB.prepare(
-              'INSERT INTO users (id, identifier, password_hash, salt, invite_code, shreewin_uid, status, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-            ).bind(realUid, identifier.toLowerCase(), hashed, '', shreewinUser.parentInviteCode || null, realUid, 'active', nowStr).run();
+              'INSERT INTO users (id, identifier, password_hash, salt, invite_code, external_uid, status, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            ).bind(realUid, identifier.toLowerCase(), hashed, '', providerUser.parentInviteCode || null, realUid, 'active', nowStr).run();
             user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(realUid).first();
           } else {
-            await env.DB.prepare('UPDATE users SET shreewin_uid = ? WHERE id = ?').bind(realUid, user.id).run();
-            user.shreewin_uid = realUid;
+            await env.DB.prepare('UPDATE users SET external_uid = ? WHERE id = ?').bind(realUid, user.id).run();
+            user.external_uid = realUid;
           }
 
           // Sync real balance to D1
@@ -280,10 +284,14 @@ export default {
             VALUES (?, ?, ?, ?, ?)
           `).bind('USER_LOGGED_IN', user.id, sid, nowStr, JSON.stringify({
             device_id,
-            shreewin_sync: Boolean(shreewinUser),
-            shreewin_uid: shreewinUser ? shreewinUser.UserId : null
+            provider_sync: Boolean(providerUser),
+            external_uid: providerUser ? providerUser.UserId : null
           }))
         ]);
+
+        const externalUid = providerUser ? providerUser.UserId : (user.external_uid || null);
+        const upstreamToken = providerUser ? providerUser.token : null;
+        const providerSessionUrl = providerUser ? providerUser.lotteryLoginUrl : null;
 
         const accessToken = await createJwt({
           sub: String(user.id),
@@ -291,10 +299,22 @@ export default {
           iat: nowSec(),
           exp: nowSec() + 15 * 60,
           typ: 'access',
-          shreewin_uid: shreewinUser ? shreewinUser.UserId : null,
-          shreewin_token: shreewinUser ? shreewinUser.token : null,
-          lottery_login_url: shreewinUser ? shreewinUser.lotteryLoginUrl : null,
+          external_uid: externalUid,
+          upstream_token: upstreamToken,
+          provider_session_url: providerSessionUrl,
+          // Compatibility aliases
+          shreewin_uid: externalUid,
+          shreewin_token: upstreamToken,
+          lottery_login_url: providerSessionUrl,
         }, jwtSecret);
+
+        const providerProfile = providerUser ? {
+          uid: providerUser.UserId,
+          nick_name: providerUser.NickName,
+          total_balance: totalBalance,
+          provider_session_url: providerUser.lotteryLoginUrl,
+          parent_invite_code: providerUser.parentInviteCode,
+        } : null;
 
         return json({
           access_token: accessToken,
@@ -302,13 +322,12 @@ export default {
           refresh_token: refresh,
           session_id: sid,
           user_id: user.id,
-          shreewin_profile: shreewinUser ? {
-            uid: shreewinUser.UserId,
-            nick_name: shreewinUser.NickName,
-            total_balance: totalBalance,
-            lottery_login_url: shreewinUser.lotteryLoginUrl,
-            parent_invite_code: shreewinUser.parentInviteCode,
-          } : null,
+          external_uid: externalUid,
+          provider_profile: providerProfile,
+          // Compatibility aliases
+          shreewin_uid: externalUid,
+          shreewin_profile: providerProfile,
+          lottery_login_url: providerSessionUrl,
           expires_at: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
         });
       }
@@ -398,14 +417,19 @@ export default {
         const ctx = await requireContext();
         if (ctx.error) return ctx.error;
         const { user, sess, payload } = ctx;
+        const externalUid = user.external_uid || payload.external_uid || payload.shreewin_uid || null;
+        const sessionUrl = payload.provider_session_url || payload.lottery_login_url || null;
 
         return json({
           authenticated: true,
           user_id: user.id,
           session_id: sess.id,
           invite_code: user.invite_code,
-          shreewin_uid: user.shreewin_uid || payload.shreewin_uid || null,
-          lottery_login_url: payload.lottery_login_url || null,
+          external_uid: externalUid,
+          provider_session_url: sessionUrl,
+          // Backward compatibility aliases
+          shreewin_uid: externalUid,
+          lottery_login_url: sessionUrl,
           registered_at: user.registered_at,
           session_expires_at: sess.expires_at,
           last_seen_at: sess.last_seen_at,
@@ -420,10 +444,11 @@ export default {
         if (ctx.error) return ctx.error;
         const { user, payload } = ctx;
 
-        // If user logged in with live ShreeWin token, refresh balance live
-        if (payload.shreewin_token) {
+        // If user logged in with live upstream token, refresh balance live
+        const activeUpstreamToken = payload.upstream_token || payload.shreewin_token;
+        if (activeUpstreamToken) {
           try {
-            const walletResp = await callShreewin('/api/webapi/GetAllwallets', {}, payload.shreewin_token);
+            const walletResp = await callProviderApi('/api/webapi/GetAllwallets', {}, activeUpstreamToken);
             if (walletResp.code === 0 && walletResp.data && walletResp.data.thidGameBalanceList) {
               let sum = 0.0;
               for (const w of walletResp.data.thidGameBalanceList) {
@@ -623,11 +648,14 @@ export default {
         const locked = b ? Number(b.locked_amount) : 0;
         const available = Math.max(0, cash - locked);
 
+        const extUid = payload.external_uid || payload.shreewin_uid || user.external_uid || user.id;
+
         return json({
           user: {
             id: user.id,
             registered: true,
-            shreewin_uid: payload.shreewin_uid || user.id,
+            external_uid: extUid,
+            shreewin_uid: extUid,
             invite_code: user.invite_code,
             registered_at: user.registered_at,
           },

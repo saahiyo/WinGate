@@ -4,11 +4,13 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
     invite_code TEXT,
+    external_uid INTEGER,
     status TEXT DEFAULT 'active',
     registered_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_users_identifier ON users(identifier);
 CREATE INDEX IF NOT EXISTS idx_users_invite_code ON users(invite_code);
+CREATE INDEX IF NOT EXISTS idx_users_external_uid ON users(external_uid);
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
     id TEXT PRIMARY KEY,
