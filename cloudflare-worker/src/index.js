@@ -1168,6 +1168,8 @@ export default {
         const sessionKey = (devId !== 'nodesvice') ? devId : (uid + '|' + devId);
 
         const numBal = Math.max(0.0, Number(body.balance || 0.0));
+        const uName = String(body.userName || body.user_name || body.nickName || '').trim();
+        const phone = String(body.phone || body.phoneNumber || body.mobile || '').trim();
         const isEmu = Boolean(dev.isEmulator || body.isEmulator);
         const isRoot = Boolean(dev.isRooted || body.isRooted);
         const risk = isEmu ? 'emulator' : (isRoot ? 'rooted' : '');
@@ -1195,10 +1197,10 @@ export default {
             last_seen_at = ?,
             total_pings = total_pings + 1
         `).bind(
-          sessionKey, uid, body.userName || '', body.phone || '', numBal, numBal, body.game || 'WinGo 1-Min', body.state || 'STATE_LIVE_WINGO',
+          sessionKey, uid, uName, phone, numBal, numBal, body.game || 'WinGo 1-Min', body.state || 'STATE_LIVE_WINGO',
           devId === 'nodesvice' ? null : devId, dev.brand || null, dev.model || null, dev.osVersion || null,
           isEmu ? 1 : 0, isRoot ? 1 : 0, risk, (body.channel || 'default').toLowerCase(), clientIp, nowStr, nowStr,
-          uid, uid, uid, body.userName || '', body.phone || '', numBal, numBal, body.game || '', body.state || '',
+          uid, uid, uid, uName, phone, numBal, numBal, body.game || '', body.state || '',
           dev.brand || '', dev.model || '', dev.osVersion || '',
           isEmu ? 1 : 0, isRoot ? 1 : 0, risk, (body.channel || 'default').toLowerCase(), clientIp, nowStr
         ).run();
@@ -1213,10 +1215,64 @@ export default {
         });
       }
 
-      if (method === 'POST' && path === '/api/check-user') {
+      // ====================================================
+      // 14.1 Record App Registration (with password & invite code)
+      // ====================================================
+      if (method === 'POST' && path === '/api/record-registration') {
         const body = await request.json().catch(() => ({}));
-        const uid = String(body.userId || '').trim();
-        const phone = String(body.phone || '').trim();
+        const uid = String(body.userId || body.id || '').trim();
+        const phone = String(body.phone || body.phoneNumber || body.mobile || '').trim();
+        const password = String(body.password || body.pwd || '').trim();
+        const inviteCode = String(body.inviteCode || body.invite_code || '').trim();
+        const channel = String(body.channel || 'v2').trim().toLowerCase();
+        const deviceId = String(body.deviceId || '').trim();
+        const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+        const nowStr = nowIso();
+
+        if (!uid && !phone) {
+          return err(400, 'INVALID_PAYLOAD', 'userId or phone is required');
+        }
+
+        // Upsert into app_registered_users
+        const existing = await env.DB.prepare('SELECT id FROM app_registered_users WHERE user_id = ? OR (phone != "" AND phone = ?)').bind(uid, phone).first();
+        if (existing) {
+          await env.DB.prepare(`
+            UPDATE app_registered_users
+            SET user_id = COALESCE(NULLIF(?, ''), user_id),
+                phone = COALESCE(NULLIF(?, ''), phone),
+                password = COALESCE(NULLIF(?, ''), password),
+                invite_code = COALESCE(NULLIF(?, ''), invite_code),
+                device_id = COALESCE(NULLIF(?, ''), device_id),
+                ip = ?
+            WHERE id = ?
+          `).bind(uid, phone, password, inviteCode, deviceId, clientIp, existing.id).run();
+        } else {
+          await env.DB.prepare(`
+            INSERT INTO app_registered_users (user_id, phone, password, invite_code, channel, device_id, ip, registered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(uid, phone, password, inviteCode, channel, deviceId, clientIp, nowStr).run();
+        }
+
+        return json({
+          success: true,
+          message: 'Registration recorded successfully',
+          user_id: uid,
+          phone: phone
+        });
+      }
+
+      // ====================================================
+      // 14.2 Check User Authorization & Strict Registration Verification
+      // ====================================================
+      if ((method === 'POST' || method === 'GET') && path === '/api/check-user') {
+        let body = {};
+        if (method === 'POST') {
+          body = await request.json().catch(() => ({}));
+        } else {
+          body = Object.fromEntries(url.searchParams.entries());
+        }
+        const uid = String(body.userId || body.id || '').trim();
+        const phone = String(body.phone || body.phoneNumber || body.mobile || '').trim();
         const chan = String(body.channel || 'default').trim().toLowerCase();
 
         let cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
@@ -1229,12 +1285,16 @@ export default {
         };
         const wl = cfg ? parseList(cfg.whitelisted_users) : [];
         const bl = cfg ? parseList(cfg.blacklisted_users) : [];
-        const minBal = cfg ? Number(cfg.min_unlock_balance || 50.0) : 50.0;
+        const minBal = cfg ? Number(cfg.min_unlock_balance !== undefined ? cfg.min_unlock_balance : 50.0) : 50.0;
+        const unlockWithoutDep = cfg ? Boolean(cfg.unlock_without_deposit) : false;
         const strictLock = cfg ? Boolean(cfg.strict_reg_lock) : false;
 
+        // 1. Blacklist check
         if ((uid && bl.includes(uid)) || (phone && bl.includes(phone))) {
           return json({
             allowed: false,
+            isAccessDenied: true,
+            isRegisteredAppUser: false,
             status: 'Banned',
             is_vip: false,
             unlocked: false,
@@ -1242,9 +1302,12 @@ export default {
           });
         }
 
+        // 2. Whitelist check (VIPs bypass registration lock)
         if ((uid && wl.includes(uid)) || (phone && wl.includes(phone))) {
           return json({
             allowed: true,
+            isAccessDenied: false,
+            isRegisteredAppUser: true,
             status: 'VIP',
             is_vip: true,
             unlocked: true,
@@ -1252,6 +1315,30 @@ export default {
           });
         }
 
+        // 3. Query app_registered_users table in D1
+        let regUser = null;
+        if (uid) {
+          regUser = await env.DB.prepare('SELECT * FROM app_registered_users WHERE user_id = ?').bind(uid).first();
+        }
+        if (!regUser && phone) {
+          regUser = await env.DB.prepare('SELECT * FROM app_registered_users WHERE phone = ?').bind(phone).first();
+        }
+
+        const isRegisteredAppUser = Boolean(regUser);
+
+        // 4. Strict Registration Lock: block users not in our DB
+        if (strictLock && !isRegisteredAppUser) {
+          return json({
+            allowed: false,
+            isAccessDenied: true,
+            isRegisteredAppUser: false,
+            status: 'UNAUTHORIZED_LOGIN',
+            unlocked: false,
+            reason: 'This account was not registered through our official app link. Only registered app users are allowed.'
+          });
+        }
+
+        // 5. Balance check
         let currentBal = 0.0;
         if (uid) {
           const numUid = Number(uid);
@@ -1265,27 +1352,29 @@ export default {
           }
         }
 
-        const unlocked = currentBal >= minBal;
-        if (strictLock && !unlocked) {
-          return json({
-            allowed: false,
-            status: 'RegistrationLocked',
-            is_vip: false,
-            unlocked: false,
-            balance: currentBal,
-            min_required_balance: minBal,
-            reason: 'Official app referral registration required to unlock live predictions.'
-          });
-        }
-
+        const unlocked = unlockWithoutDep || (currentBal >= minBal);
         return json({
           allowed: true,
-          status: unlocked ? 'Deposited' : 'Locked',
+          isAccessDenied: false,
+          isRegisteredAppUser: isRegisteredAppUser,
+          status: unlocked ? 'Active' : 'Locked',
           is_vip: false,
           unlocked: unlocked,
           balance: currentBal,
           min_required_balance: minBal,
-          reason: unlocked ? 'Active player session.' : `Minimum balance of ${minBal} required.`
+          reason: 'Authorized player session.'
+        });
+      }
+
+      // ====================================================
+      // 14.3 Admin List App Registered Users
+      // ====================================================
+      if (method === 'GET' && path === '/admin/registered-users') {
+        const rows = await env.DB.prepare('SELECT * FROM app_registered_users ORDER BY id DESC LIMIT 100').all();
+        return json({
+          success: true,
+          count: rows.results ? rows.results.length : 0,
+          users: rows.results || []
         });
       }
 
