@@ -355,3 +355,17 @@ def test_wingo_public_endpoints_no_auth():
     assert d4['auth_required'] is False
     assert 'numbers' in d4
 
+def test_wingo_live_stream_sse():
+    with client.stream('GET', '/games/wingo/live-stream?type=1m') as r:
+        assert r.status_code == 200
+        assert 'text/event-stream' in r.headers['content-type']
+        lines = []
+        for line in r.iter_lines():
+            if line:
+                lines.append(line)
+            if len(lines) >= 4:
+                break
+        combined = '\n'.join(lines)
+        assert 'event: connected' in combined or 'event: tick' in combined
+
+

@@ -510,6 +510,146 @@ export default {
       const isWingoRecent = (path === '/games/wingo/recent-results' || path === '/wingo/recent-results');
       const isWingoRules = (path === '/games/wingo/rules' || path === '/wingo/rules');
       const isWingoTrxTypes = (path === '/games/wingo/trx/types' || path === '/wingo/trx/types');
+      const isWingoStream = (path === '/games/wingo/live-stream' || path === '/wingo/live-stream');
+
+      // Server-Sent Events (SSE) Real-Time Live Draw & Countdown Stream
+      if (method === 'GET' && isWingoStream) {
+        const query = url.searchParams;
+        const parseTypeId = (raw) => {
+          if (!raw) return 1;
+          const s = String(raw).toLowerCase().trim();
+          if (s === '30' || s === '30s' || s === '30sec' || s === 'wingo_30s') return 30;
+          if (s === '1' || s === '1m' || s === '1min' || s === 'wingo_1m') return 1;
+          if (s === '2' || s === '3' || s === '3m' || s === '3min' || s === 'wingo_3m') return 2;
+          if (s === '3' || s === '5' || s === '5m' || s === '5min' || s === 'wingo_5m') return 3;
+          if (s === '4' || s === '10' || s === '10m' || s === '10min') return 4;
+          const n = parseInt(s, 10);
+          return isNaN(n) ? 1 : n;
+        };
+        const typeId = parseTypeId(query.get('type_id') || query.get('type') || 1);
+
+        const encoder = new TextEncoder();
+        let intervalId = null;
+        let active = true;
+
+        const stream = new ReadableStream({
+          async start(controller) {
+            function send(event, data) {
+              if (!active) return;
+              try {
+                controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+              } catch (e) {
+                active = false;
+              }
+            }
+
+            // Send initial connection event
+            send('connected', {
+              status: 'live',
+              type_id: typeId,
+              connected_at: nowIso(),
+            });
+
+            // Fetch current active issue
+            let issueResp = await callProviderApi('/api/webapi/GetGameIssue', { typeId });
+            let currentIssue = issueResp?.data?.issueNumber || null;
+            let remainingSeconds = 60;
+            if (issueResp?.data?.endTime && issueResp?.data?.serviceTime) {
+              const endMs = new Date(issueResp.data.endTime.replace(/-/g, '/')).getTime();
+              const servMs = new Date(issueResp.data.serviceTime.replace(/-/g, '/')).getTime();
+              remainingSeconds = Math.max(0, Math.floor((endMs - servMs) / 1000));
+            }
+
+            send('tick', {
+              type_id: typeId,
+              issue_number: currentIssue,
+              countdown_seconds: remainingSeconds,
+              server_time: issueResp?.data?.serviceTime || nowIso(),
+            });
+
+            // Tick countdown every 1 second
+            intervalId = setInterval(async () => {
+              if (!active) {
+                clearInterval(intervalId);
+                return;
+              }
+
+              remainingSeconds--;
+
+              if (remainingSeconds <= 0) {
+                send('round_ended', {
+                  type_id: typeId,
+                  issue_number: currentIssue,
+                  ended_at: nowIso(),
+                });
+
+                // Fetch new round and latest draw result
+                try {
+                  const [newIssue, historyResp] = await Promise.all([
+                    callProviderApi('/api/webapi/GetGameIssue', { typeId }),
+                    callProviderApi('/api/webapi/GetNoaverageEmerdList', { typeId, pageNo: 1, pageSize: 1 })
+                  ]);
+
+                  if (historyResp?.data?.list?.[0]) {
+                    const item = historyResp.data.list[0];
+                    const num = Number(item.number);
+                    const colors = [];
+                    if (num === 0) colors.push('red', 'violet');
+                    else if (num === 5) colors.push('green', 'violet');
+                    else if ([1, 3, 7, 9].includes(num)) colors.push('green');
+                    else if ([2, 4, 6, 8].includes(num)) colors.push('red');
+
+                    send('result', {
+                      type_id: typeId,
+                      issue_number: item.issueNumber,
+                      number: isNaN(num) ? null : num,
+                      colours: item.colour ? item.colour.split(',') : colors,
+                      size: num >= 5 ? 'big' : 'small',
+                      premium: item.premium ? Number(item.premium) : null,
+                    });
+                  }
+
+                  if (newIssue?.data) {
+                    currentIssue = newIssue.data.issueNumber;
+                    if (newIssue.data.endTime && newIssue.data.serviceTime) {
+                      const endMs = new Date(newIssue.data.endTime.replace(/-/g, '/')).getTime();
+                      const servMs = new Date(newIssue.data.serviceTime.replace(/-/g, '/')).getTime();
+                      remainingSeconds = Math.max(0, Math.floor((endMs - servMs) / 1000));
+                    } else {
+                      remainingSeconds = typeId === 30 ? 30 : 60;
+                    }
+                  } else {
+                    remainingSeconds = typeId === 30 ? 30 : 60;
+                  }
+                } catch (err) {
+                  remainingSeconds = typeId === 30 ? 30 : 60;
+                }
+              }
+
+              send('tick', {
+                type_id: typeId,
+                issue_number: currentIssue,
+                countdown_seconds: remainingSeconds,
+                server_time: nowIso(),
+              });
+            }, 1000);
+          },
+          cancel() {
+            active = false;
+            if (intervalId) clearInterval(intervalId);
+          }
+        });
+
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+            ...corsHeaders,
+          }
+        });
+      }
 
       if ((method === 'GET' || method === 'POST') && (isWingoTypes || isWingoIssue || isWingoHistory || isWingoRecent || isWingoRules || isWingoTrxTypes)) {
         let reqBody = {};

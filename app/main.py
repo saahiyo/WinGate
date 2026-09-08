@@ -1,10 +1,13 @@
+import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 import secrets
 
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, Depends, HTTPException, Header, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -941,4 +944,70 @@ def wingo_trx_types():
         'auth_required': False,
         'types': types,
     }
+
+@app.get('/games/wingo/live-stream')
+@app.get('/wingo/live-stream')
+async def wingo_live_stream(request: Request, type: str | None = None, type_id: str | None = None):
+    type_val = parse_wingo_type_id(type_id or type or 1)
+
+    async def event_generator():
+        # 1. Connection acknowledgement
+        yield f"event: connected\ndata: {json.dumps({'status': 'live', 'type_id': type_val, 'connected_at': utcnow().isoformat()})}\n\n"
+
+        # 2. Initial round snapshot
+        issue_resp = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_val})
+        d = issue_resp.get('data') or {}
+        current_issue = d.get('issueNumber')
+        remaining_seconds = 60
+        if d.get('endTime') and d.get('serviceTime'):
+            try:
+                end_t = datetime.strptime(d['endTime'], '%Y-%m-%d %H:%M:%S')
+                serv_t = datetime.strptime(d['serviceTime'], '%Y-%m-%d %H:%M:%S')
+                remaining_seconds = max(0, int((end_t - serv_t).total_seconds()))
+            except Exception:
+                pass
+
+        yield f"event: tick\ndata: {json.dumps({'type_id': type_val, 'issue_number': current_issue, 'countdown_seconds': remaining_seconds, 'server_time': d.get('serviceTime') or utcnow().isoformat()})}\n\n"
+
+        while not await request.is_disconnected():
+            await asyncio.sleep(1)
+            remaining_seconds -= 1
+
+            if remaining_seconds <= 0:
+                yield f"event: round_ended\ndata: {json.dumps({'type_id': type_val, 'issue_number': current_issue, 'ended_at': utcnow().isoformat()})}\n\n"
+
+                try:
+                    new_issue = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_val})
+                    history_resp = call_provider_api('/api/webapi/GetNoaverageEmerdList', {'typeId': type_val, 'pageNo': 1, 'pageSize': 1})
+
+                    if history_resp.get('data', {}).get('list'):
+                        result_item = enrich_wingo_result(history_resp['data']['list'][0])
+                        yield f"event: result\ndata: {json.dumps(result_item)}\n\n"
+
+                    d_new = new_issue.get('data') or {}
+                    current_issue = d_new.get('issueNumber')
+                    if d_new.get('endTime') and d_new.get('serviceTime'):
+                        try:
+                            end_t = datetime.strptime(d_new['endTime'], '%Y-%m-%d %H:%M:%S')
+                            serv_t = datetime.strptime(d_new['serviceTime'], '%Y-%m-%d %H:%M:%S')
+                            remaining_seconds = max(0, int((end_t - serv_t).total_seconds()))
+                        except Exception:
+                            remaining_seconds = 30 if type_val == 30 else 60
+                    else:
+                        remaining_seconds = 30 if type_val == 30 else 60
+                except Exception:
+                    remaining_seconds = 30 if type_val == 30 else 60
+
+            yield f"event: tick\ndata: {json.dumps({'type_id': type_val, 'issue_number': current_issue, 'countdown_seconds': remaining_seconds, 'server_time': utcnow().isoformat()})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
 
