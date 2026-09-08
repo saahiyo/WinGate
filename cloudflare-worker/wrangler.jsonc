@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "user-state-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-03-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "user-state-d1",
+      "database_id": "a1ab2b45-b61a-49a9-8cb9-75d49d3e2668"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "MIN_PASSWORD_LENGTH": "8",
+    "PAGE_STALE_SECONDS": "120",
+    "GAME_HEARTBEAT_GRACE_SECONDS": "90",
+    "GAME_SESSION_TTL_SECONDS": "3600",
+    "JWT_SECRET_KEY": "4f8a7e2b9c1d6e3f5a0b4c8d2e6f1a9b3c7d5e1f0a2b4c6d8e0f2a4b6c8d0e2"
+  }
+}
