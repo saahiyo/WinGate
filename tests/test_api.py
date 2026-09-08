@@ -297,3 +297,61 @@ def test_concurrent_debits_prevent_double_spending():
     # Remaining balance must be exactly 10.00
     final_bal = client.get('/wallet/available-balance', headers=h).json()['available_for_game']
     assert final_bal == 10.0
+
+def test_healthz_and_configurable_urls():
+    r = client.get('/healthz')
+    assert r.status_code == 200
+    data = r.json()
+    assert data['status'] == 'ok'
+    assert 'provider_api_url' in data
+    assert 'game_base_url' in data
+
+def test_game_launch_custom_game_base_url():
+    token, _, _ = auth_user()
+    h = {'Authorization': f'Bearer {token}'}
+    custom_url = 'https://custom-game-domain.example.com'
+    r = client.post(
+        '/games/launch',
+        headers=h,
+        json={'game_id': 'wingo-1m', 'vendor': 'internal', 'game_base_url': custom_url}
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert 'launch_url' in data
+    assert data['launch_url'].startswith(custom_url)
+    assert 'session_id=' in data['launch_url']
+    assert 'ticket=' in data['launch_url']
+
+def test_wingo_public_endpoints_no_auth():
+    # 1. Types
+    r = client.get('/games/wingo/types')
+    assert r.status_code == 200
+    d = r.json()
+    assert d['success'] is True
+    assert d['auth_required'] is False
+    assert len(d['types']) >= 1
+
+    # 2. Issue (1m)
+    r2 = client.get('/games/wingo/issue?type=1m')
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert d2['success'] is True
+    assert d2['auth_required'] is False
+    assert d2['type_id'] == 1
+    assert 'issue_number' in d2
+
+    # 3. History
+    r3 = client.get('/games/wingo/history?type=1m&size=3')
+    assert r3.status_code == 200
+    d3 = r3.json()
+    assert d3['success'] is True
+    assert d3['auth_required'] is False
+    assert len(d3['results']) <= 3
+
+    # 4. Recent results
+    r4 = client.get('/games/wingo/recent-results?type=1m')
+    assert r4.status_code == 200
+    d4 = r4.json()
+    assert d4['auth_required'] is False
+    assert 'numbers' in d4
+

@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     launch_ticket_ttl_seconds: int = 120
     idempotency_ttl_seconds: int = 86400
     cors_origins: str = 'http://localhost:3000'
+    provider_api_url: str = 'https://api.shreewinapi.com'
+    provider_origin: str = 'https://shreewin39.com'
+    game_base_url: str = 'https://h5.ar-lottery01.com'
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
     @property
     def cors_origin_list(self): return [x.strip() for x in self.cors_origins.split(',') if x.strip()]
@@ -46,6 +49,7 @@ class User(Base):
     identifier: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     invite_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    external_uid: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default='active')
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

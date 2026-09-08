@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 import secrets
 
@@ -34,6 +34,11 @@ from .security import (
     require_context,
     new_id,
     api_error,
+)
+from .provider import (
+    call_provider_api,
+    parse_wingo_type_id,
+    enrich_wingo_result,
 )
 
 @asynccontextmanager
@@ -77,6 +82,7 @@ class PageIn(BaseModel):
 class LaunchIn(BaseModel):
     game_id: str = Field(min_length=1, max_length=255)
     vendor: str | None = Field(default=None, max_length=100)
+    game_base_url: str | None = Field(default=None, max_length=500)
 
 class ConsumeTicketIn(BaseModel):
     launch_ticket: str = Field(min_length=1)
@@ -99,7 +105,12 @@ class SettleIn(BaseModel):
 
 @app.get('/healthz')
 def healthz():
-    return {'status': 'ok', 'environment': settings.environment}
+    return {
+        'status': 'ok',
+        'environment': settings.environment,
+        'provider_api_url': settings.provider_api_url,
+        'game_base_url': settings.game_base_url,
+    }
 
 @app.post('/auth/register', status_code=201)
 def register(body: RegisterIn, db: Session = Depends(get_db)):
@@ -168,6 +179,8 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
         'refresh_token': refresh,
         'session_id': sid,
         'user_id': user.id,
+        'external_uid': user.external_uid,
+        'shreewin_uid': user.external_uid,
         'expires_at': sess.expires_at,
     }
 
@@ -289,6 +302,8 @@ def me(ctx=Depends(require_context)):
     return {
         'authenticated': True,
         'user_id': user.id,
+        'external_uid': user.external_uid,
+        'shreewin_uid': user.external_uid,
         'session_id': sess.id,
         'invite_code': user.invite_code,
         'registered_at': user.registered_at,
@@ -384,12 +399,16 @@ def launch(body: LaunchIn, ctx=Depends(require_context), db: Session = Depends(g
     )
     db.commit()
 
+    base_url = (body.game_base_url or settings.game_base_url).rstrip('/')
+    launch_url = f'{base_url}/?game_id={body.game_id}&session_id={gid}&ticket={raw_ticket}'
+
     return {
         'game_session_id': gid,
         'state': gs.state,
         'expires_at': gs.expires_at,
         'launch_ticket': raw_ticket,
         'ticket_expires_at': ticket.expires_at,
+        'launch_url': launch_url,
     }
 
 @app.post('/games/tickets/consume')
@@ -530,6 +549,8 @@ def user_state(ctx=Depends(require_context), db: Session = Depends(get_db)):
         'user': {
             'id': user.id,
             'registered': True,
+            'external_uid': user.external_uid,
+            'shreewin_uid': user.external_uid,
             'invite_code': user.invite_code,
             'registered_at': user.registered_at,
         },
@@ -747,3 +768,177 @@ def execute_game_action(
 
     db.commit()
     return result
+
+# ------------------------------------------------------------------------------
+# WinGo Public Game APIs (NO AUTHENTICATION REQUIRED)
+# ------------------------------------------------------------------------------
+
+class WingoIssueIn(BaseModel):
+    type: str | int | None = None
+    type_id: str | int | None = None
+
+class WingoHistoryIn(BaseModel):
+    type: str | int | None = None
+    type_id: str | int | None = None
+    page: int = 1
+    size: int = 10
+
+def _get_wingo_issue_data(type_id: int):
+    resp = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_id})
+    if not resp or resp.get('code') != 0 or not resp.get('data'):
+        raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch current WinGo round') if resp else 'Provider unavailable')
+    d = resp['data']
+    remaining_seconds = None
+    if d.get('endTime') and d.get('serviceTime'):
+        try:
+            end_t = datetime.strptime(d['endTime'], '%Y-%m-%d %H:%M:%S')
+            serv_t = datetime.strptime(d['serviceTime'], '%Y-%m-%d %H:%M:%S')
+            remaining_seconds = max(0, int((end_t - serv_t).total_seconds()))
+        except Exception:
+            pass
+    return {
+        'success': True,
+        'auth_required': False,
+        'type_id': type_id,
+        'issue_number': d.get('issueNumber'),
+        'start_time': d.get('startTime'),
+        'end_time': d.get('endTime'),
+        'server_time': d.get('serviceTime') or resp.get('serviceNowTime'),
+        'interval_minutes': d.get('intervalM'),
+        'countdown_seconds': remaining_seconds,
+    }
+
+def _get_wingo_history_data(type_id: int, page: int, size: int):
+    page_size = min(50, max(1, size))
+    resp = call_provider_api('/api/webapi/GetNoaverageEmerdList', {
+        'typeId': type_id,
+        'pageNo': page,
+        'pageSize': page_size,
+    })
+    if not resp or resp.get('code') != 0 or not resp.get('data'):
+        raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch WinGo history') if resp else 'Provider unavailable')
+    data = resp['data']
+    results = [enrich_wingo_result(item) for item in data.get('list', [])]
+    return {
+        'success': True,
+        'auth_required': False,
+        'type_id': type_id,
+        'page_no': data.get('pageNo', page),
+        'total_page': data.get('totalPage', 0),
+        'total_count': data.get('totalCount', 0),
+        'results': results,
+    }
+
+@app.get('/games/wingo/types')
+@app.get('/wingo/types')
+@app.post('/games/wingo/types')
+@app.post('/wingo/types')
+def wingo_types():
+    resp = call_provider_api('/api/webapi/GetTypeList', {})
+    if not resp or resp.get('code') != 0 or not resp.get('data'):
+        raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch WinGo game types') if resp else 'Provider unavailable')
+    types = [
+        {
+            'type_id': item.get('typeID'),
+            'type_name': item.get('typeName'),
+            'interval_minutes': item.get('intervalM'),
+            'game_code': item.get('gameCode'),
+            'bet_scope': [int(x) for x in item.get('scope', '').split('|') if x.isdigit()] if item.get('scope') else [],
+            'multipliers': [int(x) for x in item.get('betMultiple', '').split('|') if x.isdigit()] if item.get('betMultiple') else [],
+        }
+        for item in resp['data']
+    ]
+    return {
+        'success': True,
+        'auth_required': False,
+        'server_time': resp.get('serviceNowTime') or utcnow().isoformat(),
+        'types': types,
+    }
+
+@app.get('/games/wingo/issue')
+@app.get('/wingo/issue')
+def wingo_issue_get(type: str | None = None, type_id: str | None = None):
+    type_val = parse_wingo_type_id(type_id or type or 1)
+    return _get_wingo_issue_data(type_val)
+
+@app.post('/games/wingo/issue')
+@app.post('/wingo/issue')
+def wingo_issue_post(body: WingoIssueIn | None = None):
+    raw = body.type_id if body and body.type_id is not None else (body.type if body else 1)
+    type_val = parse_wingo_type_id(raw or 1)
+    return _get_wingo_issue_data(type_val)
+
+@app.get('/games/wingo/history')
+@app.get('/wingo/history')
+def wingo_history_get(type: str | None = None, type_id: str | None = None, page: int = 1, size: int = 10):
+    type_val = parse_wingo_type_id(type_id or type or 1)
+    return _get_wingo_history_data(type_val, page, size)
+
+@app.post('/games/wingo/history')
+@app.post('/wingo/history')
+def wingo_history_post(body: WingoHistoryIn | None = None):
+    raw = body.type_id if body and body.type_id is not None else (body.type if body else 1)
+    type_val = parse_wingo_type_id(raw or 1)
+    page = body.page if body else 1
+    size = body.size if body else 10
+    return _get_wingo_history_data(type_val, page, size)
+
+@app.get('/games/wingo/recent-results')
+@app.get('/wingo/recent-results')
+@app.post('/games/wingo/recent-results')
+@app.post('/wingo/recent-results')
+def wingo_recent(type: str | None = None, type_id: str | None = None):
+    type_val = parse_wingo_type_id(type_id or type or 1)
+    resp = call_provider_api('/api/webapi/GetLastFiveIssueNumberResult', {'typeId': type_val})
+    if not resp or resp.get('code') != 0:
+        raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch recent results') if resp else 'Provider unavailable')
+    data = resp.get('data') or {}
+    return {
+        'success': True,
+        'auth_required': False,
+        'type_id': type_val,
+        'numbers': data.get('number', []),
+    }
+
+@app.get('/games/wingo/rules')
+@app.get('/wingo/rules')
+@app.post('/games/wingo/rules')
+@app.post('/wingo/rules')
+def wingo_rules(type: str | None = None, type_id: str | None = None):
+    type_val = parse_wingo_type_id(type_id or type or 1)
+    resp = call_provider_api('/api/webapi/GetRuleByTypeId', {'typeId': type_val})
+    if not resp or resp.get('code') != 0:
+        raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch WinGo rules') if resp else 'Provider unavailable')
+    data = resp.get('data') or {}
+    return {
+        'success': True,
+        'auth_required': False,
+        'type_id': type_val,
+        'presentation': data.get('gamePresentation'),
+    }
+
+@app.get('/games/wingo/trx/types')
+@app.get('/wingo/trx/types')
+@app.post('/games/wingo/trx/types')
+@app.post('/wingo/trx/types')
+def wingo_trx_types():
+    resp = call_provider_api('/api/webapi/GetTRXtypeList', {})
+    if not resp or resp.get('code') != 0 or not resp.get('data'):
+        raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch TRX WinGo types') if resp else 'Provider unavailable')
+    types = [
+        {
+            'type_id': item.get('typeID'),
+            'type_name': item.get('typeName'),
+            'interval_minutes': item.get('intervalM'),
+            'game_code': item.get('gameCode'),
+            'bet_scope': [int(x) for x in item.get('scope', '').split('|') if x.isdigit()] if item.get('scope') else [],
+            'multipliers': [int(x) for x in item.get('betMultiple', '').split('|') if x.isdigit()] if item.get('betMultiple') else [],
+        }
+        for item in resp['data']
+    ]
+    return {
+        'success': True,
+        'auth_required': False,
+        'types': types,
+    }
+
