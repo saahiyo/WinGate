@@ -1,0 +1,28 @@
+databases:
+  - name: user-state-db
+    databaseName: user_state_db
+    user: user_state_admin
+    plan: free
+    ipAllowList: []
+
+services:
+  - type: web
+    name: user-state-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: user-state-db
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: MIN_PASSWORD_LENGTH
+        value: "8"
+      - key: CORS_ORIGINS
+        value: "*"

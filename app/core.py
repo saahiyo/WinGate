@@ -26,8 +26,14 @@ class Settings(BaseSettings):
     def cors_origin_list(self): return [x.strip() for x in self.cors_origins.split(',') if x.strip()]
 
 settings = Settings()
-connect_args = {'check_same_thread': False} if settings.database_url.startswith('sqlite') else {}
-engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
+db_url = settings.database_url
+if db_url.startswith('postgres://'):
+    db_url = db_url.replace('postgres://', 'postgresql+psycopg://', 1)
+elif db_url.startswith('postgresql://') and not db_url.startswith('postgresql+'):
+    db_url = db_url.replace('postgresql://', 'postgresql+psycopg://', 1)
+
+connect_args = {'check_same_thread': False} if db_url.startswith('sqlite') else {}
+engine = create_engine(db_url, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 class Base(DeclarativeBase): pass
