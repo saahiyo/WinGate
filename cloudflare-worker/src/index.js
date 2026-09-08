@@ -502,6 +502,183 @@ export default {
       }
 
       // ----------------------------------------------------
+      // WinGo Public Game APIs (NO AUTHENTICATION REQUIRED)
+      // ----------------------------------------------------
+      const isWingoTypes = (path === '/games/wingo/types' || path === '/wingo/types');
+      const isWingoIssue = (path === '/games/wingo/issue' || path === '/wingo/issue');
+      const isWingoHistory = (path === '/games/wingo/history' || path === '/wingo/history');
+      const isWingoRecent = (path === '/games/wingo/recent-results' || path === '/wingo/recent-results');
+      const isWingoRules = (path === '/games/wingo/rules' || path === '/wingo/rules');
+      const isWingoTrxTypes = (path === '/games/wingo/trx/types' || path === '/wingo/trx/types');
+
+      if ((method === 'GET' || method === 'POST') && (isWingoTypes || isWingoIssue || isWingoHistory || isWingoRecent || isWingoRules || isWingoTrxTypes)) {
+        let reqBody = {};
+        if (method === 'POST') {
+          reqBody = await request.json().catch(() => ({}));
+        }
+        const query = url.searchParams;
+
+        // Helper: parse game type (supports '30s', '1m', '3m', '5m', or raw typeId integer)
+        const parseTypeId = (raw) => {
+          if (!raw) return 1;
+          const s = String(raw).toLowerCase().trim();
+          if (s === '30' || s === '30s' || s === '30sec' || s === 'wingo_30s') return 30;
+          if (s === '1' || s === '1m' || s === '1min' || s === 'wingo_1m') return 1;
+          if (s === '2' || s === '3' || s === '3m' || s === '3min' || s === 'wingo_3m') return 2;
+          if (s === '3' || s === '5' || s === '5m' || s === '5min' || s === 'wingo_5m') return 3;
+          if (s === '4' || s === '10' || s === '10m' || s === '10min') return 4;
+          const n = parseInt(s, 10);
+          return isNaN(n) ? 1 : n;
+        };
+
+        // 1. WinGo Game Types (30s, 1m, 3m, 5m)
+        if (isWingoTypes) {
+          const resp = await callProviderApi('/api/webapi/GetTypeList', {});
+          if (!resp || resp.code !== 0 || !resp.data) {
+            return err(502, 'PROVIDER_UNAVAILABLE', resp?.msg || 'Failed to fetch WinGo game types');
+          }
+          const types = resp.data.map(item => ({
+            type_id: item.typeID,
+            type_name: item.typeName,
+            interval_minutes: item.intervalM,
+            game_code: item.gameCode,
+            bet_scope: item.scope ? item.scope.split('|').map(Number) : [],
+            multipliers: item.betMultiple ? item.betMultiple.split('|').map(Number) : [],
+          }));
+          return json({
+            success: true,
+            auth_required: false,
+            server_time: resp.serviceNowTime || nowIso(),
+            types,
+          });
+        }
+
+        // 2. WinGo Active Round / Issue with Live Countdown
+        if (isWingoIssue) {
+          const rawType = query.get('type_id') || query.get('type') || reqBody.type_id || reqBody.type || 1;
+          const typeId = parseTypeId(rawType);
+          const resp = await callProviderApi('/api/webapi/GetGameIssue', { typeId });
+          if (!resp || resp.code !== 0 || !resp.data) {
+            return err(502, 'PROVIDER_UNAVAILABLE', resp?.msg || 'Failed to fetch current WinGo round');
+          }
+          const d = resp.data;
+          let remainingSeconds = null;
+          if (d.endTime && d.serviceTime) {
+            const endMs = new Date(d.endTime.replace(/-/g, '/')).getTime();
+            const servMs = new Date(d.serviceTime.replace(/-/g, '/')).getTime();
+            remainingSeconds = Math.max(0, Math.floor((endMs - servMs) / 1000));
+          }
+          return json({
+            success: true,
+            auth_required: false,
+            type_id: typeId,
+            issue_number: d.issueNumber,
+            start_time: d.startTime,
+            end_time: d.endTime,
+            server_time: d.serviceTime || resp.serviceNowTime,
+            interval_minutes: d.intervalM,
+            countdown_seconds: remainingSeconds,
+          });
+        }
+
+        // 3. WinGo Historical Results (Enriched with numbers, colors, size)
+        if (isWingoHistory) {
+          const rawType = query.get('type_id') || query.get('type') || reqBody.type_id || reqBody.type || 1;
+          const typeId = parseTypeId(rawType);
+          const pageNo = parseInt(query.get('page') || reqBody.page || '1', 10);
+          const pageSize = Math.min(50, Math.max(1, parseInt(query.get('size') || query.get('page_size') || reqBody.size || '10', 10)));
+
+          const resp = await callProviderApi('/api/webapi/GetNoaverageEmerdList', {
+            typeId,
+            pageNo,
+            pageSize,
+          });
+          if (!resp || resp.code !== 0 || !resp.data) {
+            return err(502, 'PROVIDER_UNAVAILABLE', resp?.msg || 'Failed to fetch WinGo history');
+          }
+          const list = (resp.data.list || []).map(item => {
+            const num = Number(item.number);
+            const colors = [];
+            if (num === 0) colors.push('red', 'violet');
+            else if (num === 5) colors.push('green', 'violet');
+            else if ([1, 3, 7, 9].includes(num)) colors.push('green');
+            else if ([2, 4, 6, 8].includes(num)) colors.push('red');
+
+            return {
+              issue_number: item.issueNumber,
+              number: isNaN(num) ? null : num,
+              colours: item.colour ? item.colour.split(',') : colors,
+              size: num >= 5 ? 'big' : 'small',
+              premium: item.premium ? Number(item.premium) : null,
+            };
+          });
+
+          return json({
+            success: true,
+            auth_required: false,
+            type_id: typeId,
+            page_no: resp.data.pageNo,
+            total_page: resp.data.totalPage,
+            total_count: resp.data.totalCount,
+            results: list,
+          });
+        }
+
+        // 4. WinGo Recent Results (Last 5 winning numbers)
+        if (isWingoRecent) {
+          const rawType = query.get('type_id') || query.get('type') || reqBody.type_id || reqBody.type || 1;
+          const typeId = parseTypeId(rawType);
+          const resp = await callProviderApi('/api/webapi/GetLastFiveIssueNumberResult', { typeId });
+          if (!resp || resp.code !== 0) {
+            return err(502, 'PROVIDER_UNAVAILABLE', resp?.msg || 'Failed to fetch recent WinGo results');
+          }
+          return json({
+            success: true,
+            auth_required: false,
+            type_id: typeId,
+            numbers: resp.data?.number || [],
+          });
+        }
+
+        // 5. WinGo Rules & Multipliers
+        if (isWingoRules) {
+          const rawType = query.get('type_id') || query.get('type') || reqBody.type_id || reqBody.type || 1;
+          const typeId = parseTypeId(rawType);
+          const resp = await callProviderApi('/api/webapi/GetRuleByTypeId', { typeId });
+          if (!resp || resp.code !== 0) {
+            return err(502, 'PROVIDER_UNAVAILABLE', resp?.msg || 'Failed to fetch WinGo rules');
+          }
+          return json({
+            success: true,
+            auth_required: false,
+            type_id: typeId,
+            presentation: resp.data?.gamePresentation || null,
+          });
+        }
+
+        // 6. TRX WinGo Game Types
+        if (isWingoTrxTypes) {
+          const resp = await callProviderApi('/api/webapi/GetTRXtypeList', {});
+          if (!resp || resp.code !== 0 || !resp.data) {
+            return err(502, 'PROVIDER_UNAVAILABLE', resp?.msg || 'Failed to fetch TRX WinGo types');
+          }
+          const types = resp.data.map(item => ({
+            type_id: item.typeID,
+            type_name: item.typeName,
+            interval_minutes: item.intervalM,
+            game_code: item.gameCode,
+            bet_scope: item.scope ? item.scope.split('|').map(Number) : [],
+            multipliers: item.betMultiple ? item.betMultiple.split('|').map(Number) : [],
+          }));
+          return json({
+            success: true,
+            auth_required: false,
+            types,
+          });
+        }
+      }
+
+      // ----------------------------------------------------
       // 9. Launch Game (Configurable Game Base URL & Launch URL)
       // ----------------------------------------------------
       if (method === 'POST' && path === '/games/launch') {
