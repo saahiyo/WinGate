@@ -1004,7 +1004,445 @@ export default {
         });
       }
 
+      // ====================================================
+      // 13. Dynamic Remote OTA Config Engine (/app/config, /api/config)
+      // ====================================================
+      if (method === 'GET' && (path === '/app/config' || path === '/api/config')) {
+        const chan = (url.searchParams.get('channel') || 'default').trim().toLowerCase();
+        let cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
+        if (!cfg && chan !== 'default') {
+          cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = "default"').first();
+        }
+        if (!cfg) {
+          const nowStr = nowIso();
+          await env.DB.prepare(`
+            INSERT INTO app_configs (channel, app_active, min_unlock_balance, whitelisted_users, blacklisted_users, broadcast_notice, broadcast_priority, deposit_url, register_url, bubble_icon_url, branding_panel_name, branding_bubble_label, branding_theme_color, win_feed_enabled, strict_reg_lock, version, updated_at)
+            VALUES (?, 1, 50.0, '[]', '[]', 'Welcome • Signals are entertainment only • 18+ play responsibly', 'important', 'https://www.shreewin.ai/#/wallet/Recharge', 'https://www.shreewin6.com/#/register?invitationCode=78763141420', 'https://i.ibb.co/fGpr57nL/20260904-132124.webp', 'NEXY', 'NEXY', '#8C25E3', 1, 0, '2.0.0', ?)
+          `).bind(chan, nowStr).run();
+          cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
+        }
+
+        const parseJsonList = (val) => {
+          try { return JSON.parse(val || '[]'); } catch (_) { return []; }
+        };
+
+        return json({
+          channel: cfg.channel,
+          app_active: Boolean(cfg.app_active),
+          min_unlock_balance: Number(cfg.min_unlock_balance || 50.0),
+          whitelisted_users: parseJsonList(cfg.whitelisted_users),
+          blacklisted_users: parseJsonList(cfg.blacklisted_users),
+          broadcast_notice: cfg.broadcast_notice,
+          broadcast_priority: cfg.broadcast_priority,
+          deposit_url: cfg.deposit_url,
+          register_url: cfg.register_url,
+          bubble_icon_url: cfg.bubble_icon_url,
+          branding: {
+            panel_name: cfg.branding_panel_name,
+            bubble_label: cfg.branding_bubble_label,
+            theme_color: cfg.branding_theme_color,
+          },
+          win_feed: {
+            enabled: Boolean(cfg.win_feed_enabled),
+            min_interval_s: 7,
+            max_interval_s: 14,
+            visible_s: 3.6,
+            first_delay_s: 4.5,
+          },
+          strict_reg_lock: Boolean(cfg.strict_reg_lock),
+          target_games: ["WinGo 30s", "WinGo 1 Min", "WinGo 3 Min", "WinGo 5 Min"],
+          version: cfg.version,
+          updated_at: cfg.updated_at,
+        });
+      }
+
+      if (method === 'POST' && (path === '/admin/app-config' || path === '/api/admin/config')) {
+        const body = await request.json().catch(() => ({}));
+        const chan = (body.channel || 'default').trim().toLowerCase();
+        let cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
+        const nowStr = nowIso();
+
+        let v = (cfg && cfg.version) || '2.0.0';
+        try {
+          const parts = v.split('.');
+          parts[parts.length - 1] = String(Number(parts[parts.length - 1] || 0) + 1);
+          v = parts.join('.');
+        } catch (_) { v = '2.0.1'; }
+
+        const app_active = body.app_active !== undefined ? (body.app_active ? 1 : 0) : (cfg ? cfg.app_active : 1);
+        const min_bal = body.min_unlock_balance !== undefined ? Number(body.min_unlock_balance) : (cfg ? cfg.min_unlock_balance : 50.0);
+        const wl = body.whitelisted_users !== undefined ? JSON.stringify(body.whitelisted_users) : (cfg ? cfg.whitelisted_users : '[]');
+        const bl = body.blacklisted_users !== undefined ? JSON.stringify(body.blacklisted_users) : (cfg ? cfg.blacklisted_users : '[]');
+        const notice = body.broadcast_notice !== undefined ? body.broadcast_notice : (cfg ? cfg.broadcast_notice : 'Welcome • Signals are entertainment only');
+        const prio = body.broadcast_priority !== undefined ? body.broadcast_priority : (cfg ? cfg.broadcast_priority : 'important');
+        const dep = body.deposit_url !== undefined ? body.deposit_url : (cfg ? cfg.deposit_url : 'https://www.shreewin.ai/#/wallet/Recharge');
+        const reg = body.register_url !== undefined ? body.register_url : (cfg ? cfg.register_url : 'https://www.shreewin6.com/#/register');
+        const icon = body.bubble_icon_url !== undefined ? body.bubble_icon_url : (cfg ? cfg.bubble_icon_url : '');
+        const pName = body.branding_panel_name !== undefined ? body.branding_panel_name : (cfg ? cfg.branding_panel_name : 'NEXY');
+        const bLabel = body.branding_bubble_label !== undefined ? body.branding_bubble_label : (cfg ? cfg.branding_bubble_label : 'NEXY');
+        const theme = body.branding_theme_color !== undefined ? body.branding_theme_color : (cfg ? cfg.branding_theme_color : '#8C25E3');
+        const feed = body.win_feed_enabled !== undefined ? (body.win_feed_enabled ? 1 : 0) : (cfg ? cfg.win_feed_enabled : 1);
+        const lock = body.strict_reg_lock !== undefined ? (body.strict_reg_lock ? 1 : 0) : (cfg ? cfg.strict_reg_lock : 0);
+
+        await env.DB.prepare(`
+          INSERT INTO app_configs (channel, app_active, min_unlock_balance, whitelisted_users, blacklisted_users, broadcast_notice, broadcast_priority, deposit_url, register_url, bubble_icon_url, branding_panel_name, branding_bubble_label, branding_theme_color, win_feed_enabled, strict_reg_lock, version, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(channel) DO UPDATE SET
+            app_active = excluded.app_active,
+            min_unlock_balance = excluded.min_unlock_balance,
+            whitelisted_users = excluded.whitelisted_users,
+            blacklisted_users = excluded.blacklisted_users,
+            broadcast_notice = excluded.broadcast_notice,
+            broadcast_priority = excluded.broadcast_priority,
+            deposit_url = excluded.deposit_url,
+            register_url = excluded.register_url,
+            bubble_icon_url = excluded.bubble_icon_url,
+            branding_panel_name = excluded.branding_panel_name,
+            branding_bubble_label = excluded.branding_bubble_label,
+            branding_theme_color = excluded.branding_theme_color,
+            win_feed_enabled = excluded.win_feed_enabled,
+            strict_reg_lock = excluded.strict_reg_lock,
+            version = excluded.version,
+            updated_at = excluded.updated_at
+        `).bind(chan, app_active, min_bal, wl, bl, notice, prio, dep, reg, icon, pName, bLabel, theme, feed, lock, v, nowStr).run();
+
+        const updated = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
+        return json({
+          success: true,
+          message: `Config updated for channel '${chan}'`,
+          config: {
+            channel: updated.channel,
+            app_active: Boolean(updated.app_active),
+            min_unlock_balance: Number(updated.min_unlock_balance),
+            whitelisted_users: JSON.parse(updated.whitelisted_users || '[]'),
+            blacklisted_users: JSON.parse(updated.blacklisted_users || '[]'),
+            broadcast_notice: updated.broadcast_notice,
+            broadcast_priority: updated.broadcast_priority,
+            deposit_url: updated.deposit_url,
+            register_url: updated.register_url,
+            bubble_icon_url: updated.bubble_icon_url,
+            branding: { panel_name: updated.branding_panel_name, bubble_label: updated.branding_bubble_label, theme_color: updated.branding_theme_color },
+            version: updated.version,
+            updated_at: updated.updated_at,
+          }
+        });
+      }
+
+      // ====================================================
+      // 14. Live Device Telemetry & Whale Tracking (/api/heartbeat, /api/check-user, /admin/telemetry)
+      // ====================================================
+      if (method === 'POST' && path === '/api/heartbeat') {
+        const body = await request.json().catch(() => ({}));
+        const rawUid = String(body.userId || '').trim();
+        const clientIp = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+        const uid = rawUid || ('guest_' + clientIp.replace(/[^a-zA-Z0-9]/g, '').slice(-6));
+
+        const dev = (body && typeof body.device === 'object' && body.device) || {};
+        const devId = String(dev.deviceId || body.deviceId || '').trim().slice(0, 32) || 'nodesvice';
+        const sessionKey = uid + '|' + devId;
+
+        const numBal = Math.max(0.0, Number(body.balance || 0.0));
+        const isEmu = Boolean(dev.isEmulator || body.isEmulator);
+        const isRoot = Boolean(dev.isRooted || body.isRooted);
+        const risk = isEmu ? 'emulator' : (isRoot ? 'rooted' : '');
+        const nowStr = nowIso();
+
+        await env.DB.prepare(`
+          INSERT INTO device_telemetry (id, user_id, user_name, phone, balance, peak_balance, game, state, device_id, device_brand, device_model, device_os, is_emulator, is_rooted, risk, channel, ip, first_seen_at, last_seen_at, logins, total_pings)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+          ON CONFLICT(id) DO UPDATE SET
+            balance = ?,
+            peak_balance = MAX(peak_balance, ?),
+            user_name = COALESCE(NULLIF(?, ''), user_name),
+            phone = COALESCE(NULLIF(?, ''), phone),
+            game = COALESCE(NULLIF(?, ''), game),
+            state = COALESCE(NULLIF(?, ''), state),
+            is_emulator = ?,
+            is_rooted = ?,
+            risk = ?,
+            channel = COALESCE(NULLIF(?, ''), channel),
+            ip = ?,
+            last_seen_at = ?,
+            total_pings = total_pings + 1
+        `).bind(
+          sessionKey, uid, body.userName || '', body.phone || '', numBal, numBal, body.game || 'WinGo 1-Min', body.state || 'STATE_LIVE_WINGO',
+          devId === 'nodesvice' ? null : devId, dev.brand || null, dev.model || null, dev.osVersion || null,
+          isEmu ? 1 : 0, isRoot ? 1 : 0, risk, (body.channel || 'default').toLowerCase(), clientIp, nowStr, nowStr,
+          numBal, numBal, body.userName || '', body.phone || '', body.game || '', body.state || '',
+          isEmu ? 1 : 0, isRoot ? 1 : 0, risk, (body.channel || 'default').toLowerCase(), clientIp, nowStr
+        ).run();
+
+        const rec = await env.DB.prepare('SELECT * FROM device_telemetry WHERE id = ?').bind(sessionKey).first();
+        return json({
+          success: true,
+          id: sessionKey,
+          balance: Number(rec.balance || 0.0),
+          peak_balance: Number(rec.peak_balance || 0.0),
+          total_pings: rec.total_pings,
+        });
+      }
+
+      if (method === 'POST' && path === '/api/check-user') {
+        const body = await request.json().catch(() => ({}));
+        const uid = String(body.userId || '').trim();
+        const phone = String(body.phone || '').trim();
+        const chan = String(body.channel || 'default').trim().toLowerCase();
+
+        let cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
+        if (!cfg && chan !== 'default') {
+          cfg = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = "default"').first();
+        }
+
+        const parseList = (val) => {
+          try { return JSON.parse(val || '[]'); } catch (_) { return []; }
+        };
+        const wl = cfg ? parseList(cfg.whitelisted_users) : [];
+        const bl = cfg ? parseList(cfg.blacklisted_users) : [];
+        const minBal = cfg ? Number(cfg.min_unlock_balance || 50.0) : 50.0;
+        const strictLock = cfg ? Boolean(cfg.strict_reg_lock) : false;
+
+        if ((uid && bl.includes(uid)) || (phone && bl.includes(phone))) {
+          return json({
+            allowed: false,
+            status: 'Banned',
+            is_vip: false,
+            unlocked: false,
+            reason: 'Account is restricted by administration.'
+          });
+        }
+
+        if ((uid && wl.includes(uid)) || (phone && wl.includes(phone))) {
+          return json({
+            allowed: true,
+            status: 'VIP',
+            is_vip: true,
+            unlocked: true,
+            reason: 'Whitelisted VIP player.'
+          });
+        }
+
+        let currentBal = 0.0;
+        if (uid) {
+          const numUid = Number(uid);
+          if (!isNaN(numUid)) {
+            const b = await env.DB.prepare('SELECT cash_available FROM balances WHERE user_id = ?').bind(numUid).first();
+            if (b) currentBal = Number(b.cash_available || 0.0);
+          }
+          if (currentBal <= 0.0) {
+            const t = await env.DB.prepare('SELECT balance FROM device_telemetry WHERE user_id = ? ORDER BY balance DESC LIMIT 1').bind(uid).first();
+            if (t) currentBal = Number(t.balance || 0.0);
+          }
+        }
+
+        const unlocked = currentBal >= minBal;
+        if (strictLock && !unlocked) {
+          return json({
+            allowed: false,
+            status: 'RegistrationLocked',
+            is_vip: false,
+            unlocked: false,
+            balance: currentBal,
+            min_required_balance: minBal,
+            reason: 'Official app referral registration required to unlock live predictions.'
+          });
+        }
+
+        return json({
+          allowed: true,
+          status: unlocked ? 'Deposited' : 'Locked',
+          is_vip: false,
+          unlocked: unlocked,
+          balance: currentBal,
+          min_required_balance: minBal,
+          reason: unlocked ? 'Active player session.' : `Minimum balance of ${minBal} required.`
+        });
+      }
+
+      if (method === 'GET' && (path === '/admin/telemetry' || path === '/api/admin/live-players')) {
+        const chan = (url.searchParams.get('channel') || 'all').trim().toLowerCase();
+        let query = 'SELECT * FROM device_telemetry';
+        if (chan !== 'all') {
+          query += ` WHERE channel = '${chan.replace(/'/g, '')}'`;
+        }
+        query += ' ORDER BY balance DESC LIMIT 100';
+
+        const { results } = await env.DB.prepare(query).all();
+        const records = results || [];
+
+        const now = Date.now();
+        const activePlayers = records.filter(r => (now - new Date(r.last_seen_at).getTime()) <= 120000);
+        let totalCapital = 0;
+        let topBalance = 0;
+        const gameCounts = {};
+
+        records.forEach(r => {
+          const b = Number(r.balance || 0);
+          totalCapital += b;
+          if (b > topBalance) topBalance = b;
+          const g = r.game || 'WinGo 1-Min';
+          gameCounts[g] = (gameCounts[g] || 0) + 1;
+        });
+
+        return json({
+          summary: {
+            total_tracked: records.length,
+            online_now: activePlayers.length,
+            total_capital: Math.round(totalCapital * 100) / 100,
+            top_whale_balance: Math.round(topBalance * 100) / 100,
+            game_breakdown: gameCounts,
+          },
+          whales: records.slice(0, 50).map(r => ({
+            id: r.id,
+            user_id: r.user_id,
+            user_name: r.user_name,
+            phone: r.phone,
+            balance: Number(r.balance || 0),
+            peak_balance: Number(r.peak_balance || 0),
+            game: r.game,
+            risk: r.risk,
+            channel: r.channel,
+            last_seen_at: r.last_seen_at,
+          })),
+          live_active: activePlayers.map(r => ({
+            user_id: r.user_id,
+            game: r.game,
+            balance: Number(r.balance || 0),
+            device: `${r.device_brand || ''} ${r.device_model || ''}`.trim(),
+            last_seen_seconds_ago: Math.floor((now - new Date(r.last_seen_at).getTime()) / 1000),
+          }))
+        });
+      }
+
+      // ====================================================
+      // 15. Server-Authoritative WinGo Predictor (/games/wingo/prediction)
+      // ====================================================
+      if ((method === 'GET' || method === 'POST') && (path === '/games/wingo/prediction' || path === '/wingo/prediction')) {
+        let body = {};
+        if (method === 'POST') {
+          body = await request.json().catch(() => ({}));
+        }
+
+        const rawType = url.searchParams.get('typeId') || url.searchParams.get('type_id') || url.searchParams.get('type') || body.typeId || body.type_id || body.type || '1';
+        const typeStr = String(rawType).toLowerCase().trim();
+        let typeVal = 1;
+        if (['30', '30s', '30sec', 'wingo_30s'].includes(typeStr)) typeVal = 30;
+        else if (['1', '1m', '1min', 'wingo_1m'].includes(typeStr)) typeVal = 1;
+        else if (['2', '3m', '3min', 'wingo_3m'].includes(typeStr)) typeVal = 2;
+        else if (['3', '5m', '5min', 'wingo_5m'].includes(typeStr)) typeVal = 3;
+        else if (['4', '10', '10m', '10min'].includes(typeStr)) typeVal = 4;
+        else {
+          const parsed = parseInt(typeStr, 10);
+          if (!isNaN(parsed)) typeVal = parsed;
+        }
+
+        let targetIssue = url.searchParams.get('issueNumber') || url.searchParams.get('issue_number') || url.searchParams.get('issue') || body.issueNumber || body.issue_number || body.issue;
+        if (!targetIssue) {
+          try {
+            const issueResp = await callProviderApi('/api/webapi/GetGameIssue', { typeId: typeVal });
+            if (issueResp && issueResp.data && issueResp.data.issueNumber) {
+              targetIssue = issueResp.data.issueNumber;
+            }
+          } catch (_) {}
+        }
+        if (!targetIssue) {
+          targetIssue = `${nowIso().slice(0, 10).replace(/-/g, '')}1000`;
+        }
+
+        let history = [];
+        try {
+          const histResp = await callProviderApi('/api/webapi/GetNoaverageEmerdList', { typeId: typeVal, pageNo: 1, pageSize: 15 });
+          if (histResp && histResp.data && Array.isArray(histResp.data.list)) {
+            history = histResp.data.list;
+          }
+        } catch (_) {}
+
+        const typeNames = { 30: 'WinGo 30s', 1: 'WinGo 1-Min', 2: 'WinGo 3-Min', 3: 'WinGo 5-Min', 4: 'WinGo 10-Min' };
+        const gameName = typeNames[typeVal] || `WinGo Type ${typeVal}`;
+
+        let predictedSize = 'BIG';
+        let predictedColor = 'GREEN';
+        let recommendedNumbers = [7, 9];
+        let confidenceRate = 92.4;
+        let streakType = 'ALGORITHMIC_MODEL';
+        let streakCount = 1;
+        let analysis = 'Algorithmic momentum projection generated via period seed engine.';
+
+        if (history.length > 0) {
+          const sizes = history.map(item => {
+            const num = Number(item.number !== undefined ? item.number : item.openNumber);
+            return num >= 5 ? 'BIG' : 'SMALL';
+          });
+          const colors = history.map(item => {
+            const num = Number(item.number !== undefined ? item.number : item.openNumber);
+            if (num === 0 || num === 5) return 'VIOLET';
+            return [1, 3, 7, 9].includes(num) ? 'GREEN' : 'RED';
+          });
+
+          const latestSize = sizes[0] || 'BIG';
+          streakCount = 1;
+          for (let i = 1; i < sizes.length; i++) {
+            if (sizes[i] === latestSize) streakCount++;
+            else break;
+          }
+
+          if (streakCount >= 3) {
+            predictedSize = latestSize;
+            streakType = 'FOLLOW_DRAGON';
+            confidenceRate = Math.min(97.2, 87.5 + (streakCount * 1.8));
+            analysis = `${latestSize} Dragon momentum identified (${streakCount} consecutive rounds). Statistical probability favors continuation.`;
+          } else if (sizes.length >= 3 && sizes[0] !== sizes[1] && sizes[1] === sizes[2]) {
+            predictedSize = sizes[0] === 'BIG' ? 'SMALL' : 'BIG';
+            streakType = 'CHOP_ALTERNATION';
+            confidenceRate = 89.4;
+            streakCount = 2;
+            analysis = 'Alternating chop trend detected. Anticipating immediate alternation.';
+          } else {
+            predictedSize = latestSize === 'SMALL' ? 'BIG' : 'SMALL';
+            streakType = 'TREND_REVERSAL';
+            confidenceRate = 88.0;
+            streakCount = 1;
+            analysis = 'Standard trend balance cycle projected.';
+          }
+
+          const latestColor = colors[0] || (predictedSize === 'BIG' ? 'GREEN' : 'RED');
+          predictedColor = latestColor === 'VIOLET' ? (predictedSize === 'BIG' ? 'GREEN' : 'RED') : latestColor;
+          if (predictedSize === 'BIG') {
+            recommendedNumbers = predictedColor === 'GREEN' ? [7, 9] : [6, 8];
+          } else {
+            recommendedNumbers = predictedColor === 'GREEN' ? [1, 3] : [2, 4];
+          }
+        } else {
+          const seedStr = `${typeVal}:${targetIssue}`;
+          const hashHex = md5(seedStr);
+          const hashInt = parseInt(hashHex.slice(0, 8), 16);
+
+          predictedSize = (hashInt % 2 === 1) ? 'BIG' : 'SMALL';
+          predictedColor = (hashInt % 3 === 0) ? 'GREEN' : ((hashInt % 3 === 1) ? 'RED' : 'VIOLET');
+          confidenceRate = 88.0 + (hashInt % 85) / 10.0;
+          streakCount = (hashInt % 4) + 1;
+          recommendedNumbers = (predictedSize === 'BIG') ? [7, 9] : [2, 4];
+        }
+
+        return json({
+          success: true,
+          game_type: gameName,
+          type_id: typeVal,
+          issue_number: targetIssue,
+          prediction: {
+            size: String(predictedSize).toUpperCase(),
+            color: String(predictedColor).toUpperCase(),
+            recommended_numbers: recommendedNumbers,
+            confidence_rate: Math.round(confidenceRate * 10) / 10,
+            streak_type: streakType,
+            streak_count: streakCount,
+            analysis: analysis,
+          },
+          timestamp: nowSec(),
+        });
+      }
+
       return err(404, 'NOT_FOUND', `Endpoint not found: ${method} ${path}`);
+
     } catch (e) {
       return err(500, 'INTERNAL_ERROR', e.message || 'Server error');
     }

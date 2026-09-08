@@ -247,6 +247,119 @@ Content-Type: application/json
 Validates the ticket atomically, transitions session from `PENDING` to `ACTIVE`, and invalidates the ticket.
 
 ### 4. Authoritative State Overview (`GET /system/user-state`)
+### 6. Server-Authoritative WinGo Predictor (`GET /games/wingo/prediction?typeId=1` or `POST /games/wingo/prediction`)
+Calculates mathematical trend analysis (Dragon streaks, alternating chops, and color momentum) or period-seed algorithms for WinGo rounds:
+
+```http
+GET /games/wingo/prediction?typeId=1
+```
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "game_type": "WinGo 1-Min",
+  "type_id": 1,
+  "issue_number": "20260908100011122",
+  "prediction": {
+    "size": "SMALL",
+    "color": "RED",
+    "recommended_numbers": [2, 4],
+    "confidence_rate": 92.9,
+    "streak_type": "FOLLOW_DRAGON",
+    "streak_count": 3,
+    "analysis": "SMALL Dragon momentum identified (3 consecutive rounds). Statistical probability favors continuation."
+  },
+  "timestamp": 1788892875
+}
+```
+
+---
+
+## Remote App Configuration & Device Telemetry
+
+### 1. Dynamic Remote OTA Config (`GET /app/config` / `GET /api/config`)
+Serves real-time dynamic configurations for Android wrapper apps and in-page HUD injectors by channel (`?channel=v2`):
+
+```http
+GET /app/config?channel=v2
+```
+**Response (200 OK):**
+```json
+{
+  "channel": "v2",
+  "app_active": true,
+  "min_unlock_balance": 50.0,
+  "whitelisted_users": [],
+  "blacklisted_users": [],
+  "broadcast_notice": "Welcome • Signals are entertainment only • 18+ play responsibly",
+  "broadcast_priority": "important",
+  "deposit_url": "https://www.shreewin.ai/#/wallet/Recharge",
+  "register_url": "https://www.shreewin6.com/#/register?invitationCode=78763141420",
+  "bubble_icon_url": "https://i.ibb.co/fGpr57nL/20260904-132124.webp",
+  "branding": {
+    "panel_name": "NEXY",
+    "bubble_label": "NEXY",
+    "theme_color": "#8C25E3"
+  },
+  "win_feed": {
+    "enabled": true,
+    "min_interval_s": 7,
+    "max_interval_s": 14,
+    "visible_s": 3.6,
+    "first_delay_s": 4.5
+  },
+  "strict_reg_lock": false,
+  "target_games": ["WinGo 30s", "WinGo 1 Min", "WinGo 3 Min", "WinGo 5 Min"],
+  "version": "2.0.1",
+  "updated_at": "2026-09-08T18:40:54Z"
+}
+```
+
+### 2. Device Heartbeat & Risk Ingestion (`POST /api/heartbeat`)
+Ingests player presence, balance telemetry, and rooted/emulator anti-fraud risk markers:
+
+```http
+POST /api/heartbeat
+Content-Type: application/json
+
+{
+  "userId": "100234",
+  "userName": "VIP_Player",
+  "phone": "9876543210",
+  "balance": 350.50,
+  "game": "WinGo 1-Min",
+  "channel": "v2",
+  "device": {
+    "deviceId": "dev_abc123",
+    "brand": "Samsung",
+    "model": "SM-S918B",
+    "osVersion": "Android 14",
+    "isEmulator": false,
+    "isRooted": false
+  }
+}
+```
+
+### 3. User Authorization & Referral Verification (`POST /api/check-user`)
+Validates whether a player is whitelisted, deposited above threshold, or allowed by affiliate registration:
+
+```http
+POST /api/check-user
+Content-Type: application/json
+
+{
+  "userId": "100234",
+  "phone": "9876543210",
+  "channel": "v2"
+}
+```
+
+### 4. Admin Live Player Analytics (`GET /admin/telemetry` or `GET /api/admin/live-players`)
+Returns live online players (active within last 120s), total capital, game breakdown, and whale leaderboard.
+
+---
+
+## State Authorization & Game Lifecycle
 Evaluates all 4 authoritative conditions simultaneously:
 1. Authenticated session exists and is active
 2. Available balance breakdown (`cash`, `bonus`, `locked`)
@@ -263,9 +376,16 @@ Evaluates all 4 authoritative conditions simultaneously:
 | `GET` / `POST` | `/games/wingo/types` | No | List WinGo game types and time intervals |
 | `GET` / `POST` | `/games/wingo/issue` | No | Active round issue number and live countdown |
 | `GET` / `POST` | `/games/wingo/history` | No | Historical round results with numbers, colors, and sizes |
+| `GET` / `POST` | `/games/wingo/prediction` | No | Server-authoritative trend prediction & streak analysis |
 | `GET` / `POST` | `/games/wingo/recent-results` | No | Last 5 winning numbers sequence |
 | `GET` / `POST` | `/games/wingo/rules` | No | WinGo payout rules and odds presentation |
 | `GET` / `POST` | `/games/wingo/trx/types` | No | TRX WinGo game types |
+| `GET` | `/games/wingo/live-stream` | No | Server-Sent Events (SSE) real-time ticks & results feed |
+| `GET` | `/app/config` *(alias `/api/config`)* | No | Dynamic OTA remote configuration by channel |
+| `POST` | `/admin/app-config` *(alias `/api/admin/config`)* | Yes | Update channel OTA configuration & bump version |
+| `POST` | `/api/heartbeat` | No | Ingest live device telemetry, balance, and risk markers |
+| `POST` | `/api/check-user` | No | Check VIP whitelist, deposit threshold & referral lock |
+| `GET` | `/admin/telemetry` | No | Real-time whale leaderboard and active online devices |
 | `POST` | `/auth/register` | No | Register new account with identifier, password, invite code |
 | `POST` | `/auth/login` | No | Authenticate user, sync external identity, issue tokens |
 | `POST` | `/auth/refresh` | No | Rotate refresh tokens; revokes family if reuse attack detected |
@@ -286,10 +406,11 @@ Evaluates all 4 authoritative conditions simultaneously:
 
 ## Running Automated Tests
 
-The test suite covers full lifecycle validation, refresh-token rotation, reuse detection, heartbeat expiration, multithreaded double-spend concurrency prevention, and public unauthenticated WinGo endpoints:
+The test suite covers full lifecycle validation, refresh-token rotation, reuse detection, heartbeat expiration, multithreaded double-spend concurrency prevention, public unauthenticated WinGo endpoints, live SSE streams, dynamic OTA configs, telemetry ingestion, and server-authoritative predictions:
 
 ```powershell
 .\.venv\Scripts\pytest.exe -v
 ```
 
-All 12 automated test cases pass with 100% success.
+All 16 automated test cases pass with 100% success.
+

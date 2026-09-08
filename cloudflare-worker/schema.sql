@@ -132,3 +132,51 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS app_configs (
+    channel TEXT PRIMARY KEY,
+    app_active INTEGER DEFAULT 1,
+    min_unlock_balance REAL DEFAULT 50.0,
+    whitelisted_users TEXT DEFAULT '[]',
+    blacklisted_users TEXT DEFAULT '[]',
+    broadcast_notice TEXT DEFAULT 'Welcome • Signals are entertainment only • 18+ play responsibly',
+    broadcast_priority TEXT DEFAULT 'important',
+    deposit_url TEXT DEFAULT 'https://www.shreewin.ai/#/wallet/Recharge',
+    register_url TEXT DEFAULT 'https://www.shreewin6.com/#/register?invitationCode=78763141420',
+    bubble_icon_url TEXT DEFAULT 'https://i.ibb.co/fGpr57nL/20260904-132124.webp',
+    branding_panel_name TEXT DEFAULT 'NEXY',
+    branding_bubble_label TEXT DEFAULT 'NEXY',
+    branding_theme_color TEXT DEFAULT '#8C25E3',
+    win_feed_enabled INTEGER DEFAULT 1,
+    strict_reg_lock INTEGER DEFAULT 0,
+    version TEXT DEFAULT '2.0.0',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_telemetry (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    user_name TEXT,
+    phone TEXT,
+    balance REAL DEFAULT 0.0,
+    peak_balance REAL DEFAULT 0.0,
+    game TEXT DEFAULT 'WinGo 1-Min',
+    state TEXT DEFAULT 'STATE_LIVE_WINGO',
+    device_id TEXT,
+    device_brand TEXT,
+    device_model TEXT,
+    device_os TEXT,
+    is_emulator INTEGER DEFAULT 0,
+    is_rooted INTEGER DEFAULT 0,
+    risk TEXT DEFAULT '',
+    channel TEXT DEFAULT 'default',
+    ip TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    logins INTEGER DEFAULT 1,
+    total_pings INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_telemetry_user ON device_telemetry(user_id);
+CREATE INDEX IF NOT EXISTS idx_telemetry_channel ON device_telemetry(channel);
+CREATE INDEX IF NOT EXISTS idx_telemetry_last_seen ON device_telemetry(last_seen_at);
+

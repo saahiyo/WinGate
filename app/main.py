@@ -28,6 +28,8 @@ from .core import (
     ActionNonce,
     ActionAuditRecord,
     IdempotencyRecord,
+    AppConfigRecord,
+    DeviceTelemetryRecord,
 )
 from .security import (
     hash_password,
@@ -779,6 +781,10 @@ def execute_game_action(
 class WingoIssueIn(BaseModel):
     type: str | int | None = None
     type_id: str | int | None = None
+    typeId: str | int | None = None
+    issue: str | None = None
+    issue_number: str | None = None
+    issueNumber: str | None = None
 
 class WingoHistoryIn(BaseModel):
     type: str | int | None = None
@@ -947,7 +953,7 @@ def wingo_trx_types():
 
 @app.get('/games/wingo/live-stream')
 @app.get('/wingo/live-stream')
-async def wingo_live_stream(request: Request, type: str | None = None, type_id: str | None = None):
+async def wingo_live_stream(request: Request, type: str | None = None, type_id: str | None = None, limit: int | None = None):
     type_val = parse_wingo_type_id(type_id or type or 1)
 
     async def event_generator():
@@ -969,9 +975,13 @@ async def wingo_live_stream(request: Request, type: str | None = None, type_id: 
 
         yield f"event: tick\ndata: {json.dumps({'type_id': type_val, 'issue_number': current_issue, 'countdown_seconds': remaining_seconds, 'server_time': d.get('serviceTime') or utcnow().isoformat()})}\n\n"
 
+        ticks_sent = 0
         while not await request.is_disconnected():
+            if limit is not None and ticks_sent >= limit:
+                break
             await asyncio.sleep(1)
             remaining_seconds -= 1
+            ticks_sent += 1
 
             if remaining_seconds <= 0:
                 yield f"event: round_ended\ndata: {json.dumps({'type_id': type_val, 'issue_number': current_issue, 'ended_at': utcnow().isoformat()})}\n\n"
@@ -1009,5 +1019,469 @@ async def wingo_live_stream(request: Request, type: str | None = None, type_id: 
             "X-Accel-Buffering": "no",
         }
     )
+
+
+# ------------------------------------------------------------------------------
+# Dynamic Remote OTA Config Engine (/app/config, /api/config, /admin/app-config)
+# ------------------------------------------------------------------------------
+
+class AppConfigIn(BaseModel):
+    channel: str = 'default'
+    app_active: bool | None = None
+    min_unlock_balance: float | None = None
+    whitelisted_users: list | None = None
+    blacklisted_users: list | None = None
+    broadcast_notice: str | None = None
+    broadcast_priority: str | None = None
+    deposit_url: str | None = None
+    register_url: str | None = None
+    bubble_icon_url: str | None = None
+    branding_panel_name: str | None = None
+    branding_bubble_label: str | None = None
+    branding_theme_color: str | None = None
+    win_feed_enabled: bool | None = None
+    strict_reg_lock: bool | None = None
+
+def _get_or_create_channel_config(db: Session, channel_key: str) -> AppConfigRecord:
+    chan = channel_key.strip().lower() if channel_key else 'default'
+    cfg = db.execute(select(AppConfigRecord).where(AppConfigRecord.channel == chan)).scalar_one_or_none()
+    if not cfg:
+        if chan != 'default':
+            default_cfg = db.execute(select(AppConfigRecord).where(AppConfigRecord.channel == 'default')).scalar_one_or_none()
+            if default_cfg:
+                return default_cfg
+        cfg = AppConfigRecord(
+            channel=chan,
+            app_active=True,
+            min_unlock_balance=50.0,
+            whitelisted_users=[],
+            blacklisted_users=[],
+            broadcast_notice="Welcome • Signals are entertainment only • 18+ play responsibly",
+            broadcast_priority="important",
+            deposit_url="https://www.shreewin.ai/#/wallet/Recharge",
+            register_url="https://www.shreewin6.com/#/register?invitationCode=78763141420",
+            bubble_icon_url="https://i.ibb.co/fGpr57nL/20260904-132124.webp",
+            branding_panel_name="NEXY",
+            branding_bubble_label="NEXY",
+            branding_theme_color="#8C25E3",
+            win_feed_enabled=True,
+            strict_reg_lock=False,
+            version="2.0.0",
+            updated_at=utcnow(),
+        )
+        db.add(cfg)
+        db.commit()
+        db.refresh(cfg)
+    return cfg
+
+def _format_config_response(cfg: AppConfigRecord) -> dict:
+    return {
+        "channel": cfg.channel,
+        "app_active": cfg.app_active,
+        "min_unlock_balance": float(cfg.min_unlock_balance or 50.0),
+        "whitelisted_users": cfg.whitelisted_users or [],
+        "blacklisted_users": cfg.blacklisted_users or [],
+        "broadcast_notice": cfg.broadcast_notice,
+        "broadcast_priority": cfg.broadcast_priority,
+        "deposit_url": cfg.deposit_url,
+        "register_url": cfg.register_url,
+        "bubble_icon_url": cfg.bubble_icon_url,
+        "branding": {
+            "panel_name": cfg.branding_panel_name,
+            "bubble_label": cfg.branding_bubble_label,
+            "theme_color": cfg.branding_theme_color,
+        },
+        "win_feed": {
+            "enabled": cfg.win_feed_enabled,
+            "min_interval_s": 7,
+            "max_interval_s": 14,
+            "visible_s": 3.6,
+            "first_delay_s": 4.5,
+        },
+        "strict_reg_lock": cfg.strict_reg_lock,
+        "target_games": ["WinGo 30s", "WinGo 1 Min", "WinGo 3 Min", "WinGo 5 Min"],
+        "version": cfg.version,
+        "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else utcnow().isoformat(),
+    }
+
+@app.get('/app/config')
+@app.get('/api/config')
+def get_app_config(channel: str = 'default', did: str | None = None, v: str | None = None, db: Session = Depends(get_db)):
+    cfg = _get_or_create_channel_config(db, channel)
+    return _format_config_response(cfg)
+
+@app.post('/admin/app-config')
+@app.post('/api/admin/config')
+def update_app_config(body: AppConfigIn, db: Session = Depends(get_db)):
+    chan = (body.channel or 'default').strip().lower()
+    cfg = db.execute(select(AppConfigRecord).where(AppConfigRecord.channel == chan)).scalar_one_or_none()
+    if not cfg:
+        cfg = _get_or_create_channel_config(db, chan)
+
+    if body.app_active is not None: cfg.app_active = body.app_active
+    if body.min_unlock_balance is not None: cfg.min_unlock_balance = Decimal(str(body.min_unlock_balance))
+    if body.whitelisted_users is not None: cfg.whitelisted_users = body.whitelisted_users
+    if body.blacklisted_users is not None: cfg.blacklisted_users = body.blacklisted_users
+    if body.broadcast_notice is not None: cfg.broadcast_notice = body.broadcast_notice
+    if body.broadcast_priority is not None: cfg.broadcast_priority = body.broadcast_priority
+    if body.deposit_url is not None: cfg.deposit_url = body.deposit_url
+    if body.register_url is not None: cfg.register_url = body.register_url
+    if body.bubble_icon_url is not None: cfg.bubble_icon_url = body.bubble_icon_url
+    if body.branding_panel_name is not None: cfg.branding_panel_name = body.branding_panel_name
+    if body.branding_bubble_label is not None: cfg.branding_bubble_label = body.branding_bubble_label
+    if body.branding_theme_color is not None: cfg.branding_theme_color = body.branding_theme_color
+    if body.win_feed_enabled is not None: cfg.win_feed_enabled = body.win_feed_enabled
+    if body.strict_reg_lock is not None: cfg.strict_reg_lock = body.strict_reg_lock
+
+    try:
+        parts = cfg.version.split('.')
+        parts[-1] = str(int(parts[-1]) + 1)
+        cfg.version = '.'.join(parts)
+    except Exception:
+        cfg.version = '2.0.1'
+
+    cfg.updated_at = utcnow()
+    db.commit()
+    db.refresh(cfg)
+    return {"success": True, "message": f"Config updated for channel '{chan}'", "config": _format_config_response(cfg)}
+
+
+# ------------------------------------------------------------------------------
+# Live Device Telemetry & Whale Tracking (/api/heartbeat, /api/check-user, /admin/telemetry)
+# ------------------------------------------------------------------------------
+
+class HeartbeatIn(BaseModel):
+    userId: str | int | None = None
+    userName: str | None = None
+    phone: str | None = None
+    balance: float = 0.0
+    game: str = 'WinGo 1-Min'
+    state: str = 'STATE_LIVE_WINGO'
+    channel: str = 'default'
+    device: dict | None = None
+
+class CheckUserIn(BaseModel):
+    userId: str | int | None = None
+    phone: str | None = None
+    channel: str = 'default'
+
+@app.post('/api/heartbeat')
+def ingest_heartbeat(body: HeartbeatIn, request: Request, db: Session = Depends(get_db)):
+    raw_uid = str(body.userId or '').strip()
+    client_ip = request.client.host if request.client else '127.0.0.1'
+    uid = raw_uid or f"guest_{abs(hash(client_ip)) % 1000000:06d}"
+
+    dev = body.device or {}
+    dev_id = str(dev.get('deviceId') or '').strip()[:32] or 'nodesvice'
+    session_key = f"{uid}|{dev_id}"
+
+    rec = db.execute(select(DeviceTelemetryRecord).where(DeviceTelemetryRecord.id == session_key)).scalar_one_or_none()
+    now = utcnow()
+
+    num_bal = max(0.0, float(body.balance or 0.0))
+    is_emu = bool(dev.get('isEmulator', False))
+    is_root = bool(dev.get('isRooted', False))
+    risk = 'emulator' if is_emu else ('rooted' if is_root else '')
+
+    if not rec:
+        rec = DeviceTelemetryRecord(
+            id=session_key,
+            user_id=uid,
+            user_name=body.userName or '',
+            phone=body.phone or '',
+            balance=num_bal,
+            peak_balance=num_bal,
+            game=body.game or 'WinGo 1-Min',
+            state=body.state or ('STATE_LIVE_WINGO' if num_bal >= 50 else 'STATE_DEPOSIT_LOCKED'),
+            device_id=dev_id if dev_id != 'nodesvice' else None,
+            device_brand=str(dev.get('brand') or '') or None,
+            device_model=str(dev.get('model') or '') or None,
+            device_os=str(dev.get('osVersion') or '') or None,
+            is_emulator=is_emu,
+            is_rooted=is_root,
+            risk=risk,
+            channel=(body.channel or 'default').strip().lower(),
+            ip=client_ip,
+            first_seen_at=now,
+            last_seen_at=now,
+            logins=1,
+            total_pings=1,
+        )
+        db.add(rec)
+    else:
+        if (now - rec.last_seen_at).total_seconds() > 1800:
+            rec.logins += 1
+        rec.balance = num_bal
+        rec.peak_balance = max(float(rec.peak_balance or 0.0), num_bal)
+        rec.user_name = body.userName or rec.user_name
+        rec.phone = body.phone or rec.phone
+        rec.game = body.game or rec.game
+        rec.state = body.state or rec.state
+        rec.is_emulator = is_emu or rec.is_emulator
+        rec.is_rooted = is_root or rec.is_rooted
+        rec.risk = risk or rec.risk
+        rec.channel = (body.channel or rec.channel or 'default').strip().lower()
+        rec.ip = client_ip
+        rec.last_seen_at = now
+        rec.total_pings += 1
+
+    db.commit()
+    db.refresh(rec)
+    return {
+        "success": True,
+        "id": rec.id,
+        "balance": float(rec.balance),
+        "peak_balance": float(rec.peak_balance),
+        "total_pings": rec.total_pings,
+    }
+
+@app.post('/api/check-user')
+def check_user(body: CheckUserIn, db: Session = Depends(get_db)):
+    uid = str(body.userId or '').strip()
+    phone = str(body.phone or '').strip()
+    chan = (body.channel or 'default').strip().lower()
+
+    cfg = _get_or_create_channel_config(db, chan)
+    whitelisted = cfg.whitelisted_users or []
+    blacklisted = cfg.blacklisted_users or []
+
+    # 1. Check blacklist
+    if (uid and uid in blacklisted) or (phone and phone in blacklisted):
+        return {
+            "allowed": False,
+            "status": "Banned",
+            "is_vip": False,
+            "unlocked": False,
+            "reason": "Account is restricted by administration."
+        }
+
+    # 2. Check whitelist (VIP bypass)
+    if (uid and uid in whitelisted) or (phone and phone in whitelisted):
+        return {
+            "allowed": True,
+            "status": "VIP",
+            "is_vip": True,
+            "unlocked": True,
+            "reason": "Whitelisted VIP player."
+        }
+
+    # 3. Check live balance from telemetry or D1 balances
+    current_balance = 0.0
+    if uid:
+        try:
+            numeric_uid = int(uid)
+            bal_rec = db.execute(select(Balance).where(Balance.user_id == numeric_uid)).scalar_one_or_none()
+            if bal_rec:
+                current_balance = float(bal_rec.cash_available or 0.0)
+        except ValueError:
+            pass
+
+    if current_balance <= 0.0:
+        telemetry = db.execute(select(DeviceTelemetryRecord).where(DeviceTelemetryRecord.user_id == uid)).scalars().all()
+        if telemetry:
+            current_balance = max([float(t.balance or 0.0) for t in telemetry])
+
+    min_bal = float(cfg.min_unlock_balance or 50.0)
+    unlocked = current_balance >= min_bal
+
+    # 4. Strict registration lock check
+    if cfg.strict_reg_lock and not unlocked:
+        return {
+            "allowed": False,
+            "status": "RegistrationLocked",
+            "is_vip": False,
+            "unlocked": False,
+            "balance": current_balance,
+            "min_required_balance": min_bal,
+            "reason": "Official app referral registration required to unlock live predictions."
+        }
+
+    return {
+        "allowed": True,
+        "status": "Deposited" if unlocked else "Locked",
+        "is_vip": False,
+        "unlocked": unlocked,
+        "balance": current_balance,
+        "min_required_balance": min_bal,
+        "reason": "Active player session." if unlocked else f"Minimum balance of {min_bal} required."
+    }
+
+@app.get('/admin/telemetry')
+@app.get('/api/admin/live-players')
+def get_admin_telemetry(channel: str = 'all', db: Session = Depends(get_db)):
+    stmt = select(DeviceTelemetryRecord)
+    if channel != 'all':
+        stmt = stmt.where(DeviceTelemetryRecord.channel == channel.strip().lower())
+    records = db.execute(stmt).scalars().all()
+
+    now = utcnow()
+    active_players = [r for r in records if (now - r.last_seen_at).total_seconds() <= 120]
+    whales = sorted(records, key=lambda r: float(r.balance or 0.0), reverse=True)
+
+    total_capital = sum(float(r.balance or 0.0) for r in records)
+    top_balance = max([float(r.balance or 0.0) for r in records], default=0.0)
+    game_breakdown: dict[str, int] = {}
+    for r in records:
+        g = r.game or 'WinGo 1-Min'
+        game_breakdown[g] = game_breakdown.get(g, 0) + 1
+
+    return {
+        "summary": {
+            "total_tracked": len(records),
+            "online_now": len(active_players),
+            "total_capital": round(total_capital, 2),
+            "top_whale_balance": round(top_balance, 2),
+            "game_breakdown": game_breakdown,
+        },
+        "whales": [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "user_name": r.user_name,
+                "phone": r.phone,
+                "balance": float(r.balance),
+                "peak_balance": float(r.peak_balance),
+                "game": r.game,
+                "risk": r.risk,
+                "channel": r.channel,
+                "last_seen_at": r.last_seen_at.isoformat(),
+            }
+            for r in whales[:50]
+        ],
+        "live_active": [
+            {
+                "user_id": r.user_id,
+                "game": r.game,
+                "balance": float(r.balance),
+                "device": f"{r.device_brand or ''} {r.device_model or ''}".strip(),
+                "last_seen_seconds_ago": int((now - r.last_seen_at).total_seconds()),
+            }
+            for r in active_players
+        ]
+    }
+
+
+# ------------------------------------------------------------------------------
+# Server-Authoritative WinGo Predictor & Trend Engine (/games/wingo/prediction)
+# ------------------------------------------------------------------------------
+
+def _generate_wingo_prediction(type_id: int, issue_number: str | None = None) -> dict:
+    import hashlib
+    type_names = {10: 'WinGo 30s', 1: 'WinGo 1-Min', 2: 'WinGo 3-Min', 3: 'WinGo 5-Min'}
+    game_name = type_names.get(type_id, f'WinGo Type {type_id}')
+
+    current_issue = issue_number
+    if not current_issue:
+        try:
+            issue_resp = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_id})
+            current_issue = issue_resp.get('data', {}).get('issueNumber')
+        except Exception:
+            pass
+    if not current_issue:
+        current_issue = f"{utcnow().strftime('%Y%m%d')}1000"
+
+    # Fetch recent history
+    history = []
+    try:
+        history_resp = call_provider_api('/api/webapi/GetNoaverageEmerdList', {'typeId': type_id, 'pageNo': 1, 'pageSize': 15})
+        raw_list = history_resp.get('data', {}).get('list') or []
+        history = [enrich_wingo_result(item) for item in raw_list]
+    except Exception:
+        pass
+
+    if history:
+        sizes = [h.get('size') for h in history if h.get('size')]
+        colors = [h.get('color') for h in history if h.get('color')]
+
+        latest_size = sizes[0] if sizes else 'BIG'
+        streak_count = 1
+        for s in sizes[1:]:
+            if s == latest_size:
+                streak_count += 1
+            else:
+                break
+
+        if streak_count >= 3:
+            predicted_size = latest_size
+            streak_type = "FOLLOW_DRAGON"
+            confidence = min(97.2, 87.5 + (streak_count * 1.8))
+            analysis = f"{latest_size} Dragon momentum identified ({streak_count} consecutive rounds). Statistical probability favors continuation."
+        elif len(sizes) >= 3 and sizes[0] != sizes[1] and sizes[1] == sizes[2]:
+            predicted_size = 'SMALL' if sizes[0] == 'BIG' else 'BIG'
+            streak_type = "CHOP_ALTERNATION"
+            confidence = 89.4
+            streak_count = 2
+            analysis = "Alternating chop trend detected. Anticipating immediate alternation."
+        else:
+            predicted_size = 'BIG' if latest_size == 'SMALL' else 'SMALL'
+            streak_type = "TREND_REVERSAL"
+            confidence = 88.0
+            streak_count = 1
+            analysis = "Standard trend balance cycle projected."
+
+        latest_color = colors[0] if colors else ('GREEN' if predicted_size == 'BIG' else 'RED')
+        if latest_color == 'VIOLET':
+            predicted_color = 'GREEN' if predicted_size == 'BIG' else 'RED'
+        else:
+            predicted_color = latest_color
+
+        if predicted_size == 'BIG':
+            recommended_numbers = [7, 9] if predicted_color == 'GREEN' else [6, 8]
+        else:
+            recommended_numbers = [1, 3] if predicted_color == 'GREEN' else [2, 4]
+
+    else:
+        seed = f"{type_id}:{current_issue}"
+        hash_val = int(hashlib.sha256(seed.encode()).hexdigest(), 16)
+
+        predicted_size = 'BIG' if (hash_val % 2 == 1) else 'SMALL'
+        predicted_color = 'GREEN' if (hash_val % 3 == 0) else ('RED' if hash_val % 3 == 1 else 'VIOLET')
+        confidence = 88.0 + (hash_val % 85) / 10.0
+        streak_count = (hash_val % 4) + 1
+        streak_type = "ALGORITHMIC_MODEL"
+        recommended_numbers = [7, 9] if predicted_size == 'BIG' else [2, 4]
+        analysis = "Algorithmic momentum projection generated via period seed engine."
+
+    return {
+        "success": True,
+        "game_type": game_name,
+        "type_id": type_id,
+        "issue_number": current_issue,
+        "prediction": {
+            "size": str(predicted_size).upper(),
+            "color": str(predicted_color).upper(),
+            "recommended_numbers": recommended_numbers,
+            "confidence_rate": round(confidence, 1),
+            "streak_type": streak_type,
+            "streak_count": streak_count,
+            "analysis": analysis,
+        },
+        "timestamp": int(utcnow().timestamp())
+    }
+
+
+@app.get('/games/wingo/prediction')
+@app.get('/wingo/prediction')
+def wingo_prediction_get(
+    type: str | None = None,
+    type_id: str | None = None,
+    typeId: str | None = None,
+    issue: str | None = None,
+    issue_number: str | None = None,
+    issueNumber: str | None = None,
+):
+    type_val = parse_wingo_type_id(type_id or typeId or type or 1)
+    target_issue = issue_number or issueNumber or issue
+    return _generate_wingo_prediction(type_val, target_issue)
+
+@app.post('/games/wingo/prediction')
+@app.post('/wingo/prediction')
+def wingo_prediction_post(body: WingoIssueIn | None = None):
+    raw = (body.type_id or body.typeId or body.type) if body else 1
+    type_val = parse_wingo_type_id(raw or 1)
+    target_issue = (body.issue_number or body.issueNumber or body.issue) if body else None
+    return _generate_wingo_prediction(type_val, target_issue)
+
+
 
 

@@ -356,16 +356,113 @@ def test_wingo_public_endpoints_no_auth():
     assert 'numbers' in d4
 
 def test_wingo_live_stream_sse():
-    with client.stream('GET', '/games/wingo/live-stream?type=1m') as r:
+    with client.stream('GET', '/games/wingo/live-stream?type=1m&limit=1') as r:
         assert r.status_code == 200
         assert 'text/event-stream' in r.headers['content-type']
         lines = []
         for line in r.iter_lines():
             if line:
                 lines.append(line)
-            if len(lines) >= 4:
-                break
         combined = '\n'.join(lines)
         assert 'event: connected' in combined or 'event: tick' in combined
+
+
+def test_dynamic_ota_config():
+    # 1. Default config
+    r = client.get('/app/config')
+    assert r.status_code == 200
+    d = r.json()
+    assert d['app_active'] is True
+    assert 'branding' in d
+    assert d['branding']['panel_name'] == 'NEXY'
+    assert 'deposit_url' in d
+
+    # 2. Update config for channel v2
+    r_update = client.post('/admin/app-config', json={
+        'channel': 'v2',
+        'broadcast_notice': 'Special VIP bonus active!',
+        'branding_panel_name': 'NEXY_PRO',
+        'min_unlock_balance': 100.0,
+    })
+    assert r_update.status_code == 200
+    d_up = r_update.json()
+    assert d_up['success'] is True
+    assert d_up['config']['branding']['panel_name'] == 'NEXY_PRO'
+    assert d_up['config']['min_unlock_balance'] == 100.0
+
+    # 3. Fetch channel v2 config
+    r_v2 = client.get('/api/config?channel=v2')
+    assert r_v2.status_code == 200
+    assert r_v2.json()['broadcast_notice'] == 'Special VIP bonus active!'
+
+
+def test_device_telemetry_heartbeat_and_check_user():
+    # 1. Post heartbeat from device
+    r_hb = client.post('/api/heartbeat', json={
+        'userId': 'test_player_99',
+        'userName': 'WhaleOne',
+        'phone': '9876543210',
+        'balance': 350.75,
+        'game': 'WinGo 1-Min',
+        'channel': 'v2',
+        'device': {
+            'deviceId': 'test_dev_uuid_123',
+            'brand': 'Google',
+            'model': 'Pixel 8',
+            'osVersion': 'Android 14',
+            'isEmulator': False,
+            'isRooted': False
+        }
+    })
+    assert r_hb.status_code == 200
+    d_hb = r_hb.json()
+    assert d_hb['success'] is True
+    assert d_hb['balance'] == 350.75
+
+    # 2. Check user access (should be unlocked because balance >= min_unlock_balance)
+    r_chk = client.post('/api/check-user', json={
+        'userId': 'test_player_99',
+        'phone': '9876543210',
+        'channel': 'v2'
+    })
+    assert r_chk.status_code == 200
+    d_chk = r_chk.json()
+    assert d_chk['allowed'] is True
+    assert d_chk['unlocked'] is True
+    assert d_chk['balance'] == 350.75
+
+    # 3. Admin telemetry dashboard
+    r_adm = client.get('/admin/telemetry?channel=all')
+    assert r_adm.status_code == 200
+    d_adm = r_adm.json()
+    assert d_adm['summary']['total_tracked'] >= 1
+    assert len(d_adm['whales']) >= 1
+    top_whale = d_adm['whales'][0]
+    assert top_whale['user_id'] == 'test_player_99'
+
+
+def test_wingo_prediction_engine():
+    # 1. GET prediction for 1-Min
+    r = client.get('/games/wingo/prediction?typeId=1&issueNumber=202609081055')
+    assert r.status_code == 200
+    d = r.json()
+    assert d['success'] is True
+    assert d['issue_number'] == '202609081055'
+    assert 'prediction' in d
+    pred = d['prediction']
+    assert pred['size'] in ('BIG', 'SMALL')
+    assert pred['color'] in ('GREEN', 'RED', 'VIOLET')
+    assert pred['confidence_rate'] >= 80.0
+    assert len(pred['recommended_numbers']) > 0
+
+    # 2. POST prediction for 30s
+    r_post = client.post('/wingo/prediction', json={'type_id': 30})
+    assert r_post.status_code == 200
+    d_post = r_post.json()
+    assert d_post['success'] is True
+    assert d_post['type_id'] == 30
+    assert d_post['prediction']['size'] in ('BIG', 'SMALL')
+
+
 
 

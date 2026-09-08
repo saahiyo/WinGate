@@ -170,6 +170,50 @@ class IdempotencyRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
+class AppConfigRecord(Base):
+    __tablename__ = 'app_configs'
+    channel: Mapped[str] = mapped_column(String(64), primary_key=True)
+    app_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    min_unlock_balance: Mapped[float] = mapped_column(Numeric(18, 2), default=50.0)
+    whitelisted_users: Mapped[dict | list | None] = mapped_column(JSON, default=list)
+    blacklisted_users: Mapped[dict | list | None] = mapped_column(JSON, default=list)
+    broadcast_notice: Mapped[str] = mapped_column(String(500), default="Welcome • Signals are entertainment only • 18+ play responsibly")
+    broadcast_priority: Mapped[str] = mapped_column(String(30), default="important")
+    deposit_url: Mapped[str] = mapped_column(String(500), default="https://www.shreewin.ai/#/wallet/Recharge")
+    register_url: Mapped[str] = mapped_column(String(500), default="https://www.shreewin6.com/#/register?invitationCode=78763141420")
+    bubble_icon_url: Mapped[str] = mapped_column(String(500), default="https://i.ibb.co/fGpr57nL/20260904-132124.webp")
+    branding_panel_name: Mapped[str] = mapped_column(String(64), default="NEXY")
+    branding_bubble_label: Mapped[str] = mapped_column(String(64), default="NEXY")
+    branding_theme_color: Mapped[str] = mapped_column(String(32), default="#8C25E3")
+    win_feed_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    strict_reg_lock: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[str] = mapped_column(String(32), default="2.0.0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+class DeviceTelemetryRecord(Base):
+    __tablename__ = 'device_telemetry'
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(100), index=True)
+    user_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    balance: Mapped[float] = mapped_column(Numeric(18, 2), default=0.0)
+    peak_balance: Mapped[float] = mapped_column(Numeric(18, 2), default=0.0)
+    game: Mapped[str] = mapped_column(String(100), default="WinGo 1-Min")
+    state: Mapped[str] = mapped_column(String(64), default="STATE_LIVE_WINGO")
+    device_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    device_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    device_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    device_os: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    is_emulator: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_rooted: Mapped[bool] = mapped_column(Boolean, default=False)
+    risk: Mapped[str] = mapped_column(String(50), default="")
+    channel: Mapped[str] = mapped_column(String(64), default="default", index=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    logins: Mapped[int] = mapped_column(Integer, default=1)
+    total_pings: Mapped[int] = mapped_column(Integer, default=1)
+
 def init_db():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
@@ -181,3 +225,4 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try: yield db
     finally: db.close()
+
