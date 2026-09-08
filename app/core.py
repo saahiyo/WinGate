@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, Numeri
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 
 class Settings(BaseSettings):
-    app_name: str = 'User State Authorization API'
+    app_name: str = 'WinGate API'
     environment: str = 'development'
     debug: bool = False
     database_url: str = 'sqlite:///./user_state.db'

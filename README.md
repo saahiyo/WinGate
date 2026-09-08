@@ -1,6 +1,6 @@
-# User State Authorization API & Platform Gateway
+# WinGate — Authoritative State Authorization & Gaming Platform Gateway
 
-An authoritative, multi-client state authorization gateway and gaming integration platform designed to enforce server-side validation for:
+**WinGate** is an authoritative, multi-client state authorization gateway and gaming integration platform designed to enforce server-side validation for:
 
 1. **User Identity & Upstream Sync** (Argon2 / PBKDF2 hashing, dynamic external client synchronization, `external_uid` mapping)
 2. **Session Authentication & Token Security** (Short-lived JWTs, rotating refresh tokens with automatic reuse-attack detection)
@@ -74,7 +74,7 @@ uvicorn app.main:app --reload --port 8000
 
 | Variable | Default | Description |
 |---|---|---|
-| `APP_NAME` | `User State Authorization API` | Application title |
+| `APP_NAME` | `WinGate API` | Application title |
 | `ENVIRONMENT` | `development` | `development` or `production` |
 | `DATABASE_URL` | `sqlite:///./user_state.db` | SQLite (`sqlite:///...`) or PostgreSQL (`postgresql+psycopg://...`) |
 | `JWT_SECRET_KEY` | `replace-this-with-a-long-random-secret` | 32+ character entropy secret key |

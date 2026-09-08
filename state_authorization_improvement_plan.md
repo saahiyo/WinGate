@@ -1,4 +1,4 @@
-# Authoritative State Authorization Platform — Architecture & Improvement Plan
+# WinGate Platform — Architecture & State Authorization Improvement Plan
 
 ## Purpose
 

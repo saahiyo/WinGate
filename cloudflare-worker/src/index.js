@@ -1,5 +1,5 @@
-// Cloudflare Worker: User State Authorization API (Authoritative Gateway)
-// Server-authoritative Identity, Provider Integration, Dynamic Wallet Sync, Game Leases & Configurable Game URLs
+// WinGate: Server-Authoritative State Authorization & Gaming Gateway
+// Identity & Upstream Provider Sync, Concurrency-Safe Balances, Game Leases & Public WinGo APIs
 
 export default {
   async fetch(request, env) {
