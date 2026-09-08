@@ -1,5 +1,5 @@
-// Cloudflare Worker: User State Authorization API
-// Server-authoritative Identity, Wallet Balance, Game Session Lease, and Action Authorization
+// Cloudflare Worker: User State Authorization API with Live ShreeWin Integration
+// Server-authoritative Identity, Live ShreeWin Sync, Wallet Balance, Game Leases & Configurable Game URL
 
 export default {
   async fetch(request, env) {
@@ -38,6 +38,53 @@ export default {
     const jwtSecret = env.JWT_SECRET_KEY || 'default-secret-key-cloudflare-2026';
     const pageStaleSec = parseInt(env.PAGE_STALE_SECONDS || '120', 10);
     const heartbeatGraceSec = parseInt(env.GAME_HEARTBEAT_GRACE_SECONDS || '90', 10);
+    const shreewinApiUrl = env.SHREEWIN_API_URL || 'https://api.shreewinapi.com';
+    const defaultGameBaseUrl = env.GAME_BASE_URL || 'https://h5.ar-lottery01.com';
+
+    // Sign payload for ShreeWin API
+    function shreewinSign(data) {
+      const t = { ...data };
+      delete t.signature;
+      delete t.timestamp;
+      t.language = 1;
+      t.random = randomHex(16);
+      const sortedKeys = Object.keys(t).sort();
+      const cleaned = {};
+      for (const k of sortedKeys) {
+        const v = t[k];
+        if (v !== null && v !== '' && !['signature', 'track', 'xosoBettingData'].includes(k)) {
+          cleaned[k] = v === 0 ? 0 : v;
+        }
+      }
+      const rawJson = JSON.stringify(cleaned);
+      t.signature = md5(rawJson).toUpperCase().slice(0, 32);
+      t.timestamp = Math.floor(Date.now() / 1000);
+      return t;
+    }
+
+    // Call live ShreeWin API
+    async function callShreewin(endpoint, data, token = null) {
+      const signed = shreewinSign(data);
+      const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || '103.44.118.79';
+      const headers = {
+        'User-Agent': request.headers.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Origin': 'https://shreewin39.com',
+        'Referer': 'https://shreewin39.com/',
+        'Content-Type': 'application/json',
+        'AR-REAL-IP': clientIp,
+        'X-Real-IP': clientIp,
+        'X-Forwarded-For': clientIp,
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const resp = await fetch(`${shreewinApiUrl}${endpoint}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(signed),
+      });
+      return await resp.json().catch(() => ({}));
+    }
 
     // Auth Middleware Helper
     async function requireContext() {
@@ -64,11 +111,10 @@ export default {
         return { error: err(401, 'AUTH_REVOKED', 'Session is revoked or expired') };
       }
 
-      // Update session last_seen_at
       await env.DB.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?')
         .bind(nowIso(), sess.id).run();
 
-      return { user, sess };
+      return { user, sess, payload };
     }
 
     try {
@@ -76,7 +122,12 @@ export default {
       // 1. Health Check
       // ----------------------------------------------------
       if (method === 'GET' && path === '/healthz') {
-        return json({ status: 'ok', environment: env.ENVIRONMENT || 'production' });
+        return json({
+          status: 'ok',
+          environment: env.ENVIRONMENT || 'production',
+          shreewin_api_url: shreewinApiUrl,
+          game_base_url: defaultGameBaseUrl,
+        });
       }
 
       // ----------------------------------------------------
@@ -109,7 +160,6 @@ export default {
 
         const userId = insertUser.meta.last_row_id;
 
-        // Initialize balance & audit
         await env.DB.batch([
           env.DB.prepare('INSERT INTO balances (user_id, cash_available, bonus_available, locked_amount, version, updated_at) VALUES (?, 0.0, 0.0, 0.0, 1, ?)')
             .bind(userId, regAt),
@@ -126,18 +176,84 @@ export default {
       }
 
       // ----------------------------------------------------
-      // 3. Login
+      // 3. Login (with Live ShreeWin Sync & Proxy)
       // ----------------------------------------------------
       if (method === 'POST' && path === '/auth/login') {
         const body = await request.json().catch(() => ({}));
-        const identifier = (body.identifier || '').trim().toLowerCase();
+        const identifier = (body.identifier || '').trim();
         const password = body.password || '';
-        const device_id = body.device_id || null;
+        const device_id = body.device_id || 'mobile-device';
 
-        const user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ?').bind(identifier).first();
-        if (!user || !(await verifyPassword(password, user.password_hash))) {
-          return err(401, 'AUTH_REQUIRED', 'Invalid credentials');
+        // Format phone for ShreeWin (e.g. 917666783464)
+        const digitsOnly = identifier.replace(/\D/g, '');
+        const phoneWith91 = digitsOnly.startsWith('91') ? digitsOnly : `91${digitsOnly}`;
+
+        let shreewinUser = null;
+        let shreewinWallets = null;
+        let totalBalance = 0.0;
+
+        // Try live ShreeWin authentication
+        try {
+          const swResp = await callShreewin('/api/webapi/Login', {
+            username: phoneWith91,
+            pwd: password,
+            logintype: 'mobile',
+            phonetype: 'Android',
+            deviceId: randomHex(16),
+          });
+
+          if (swResp.code === 0 && swResp.data) {
+            shreewinUser = swResp.data;
+            // Fetch live wallet balances across all providers
+            const walletResp = await callShreewin('/api/webapi/GetAllwallets', {}, shreewinUser.token);
+            if (walletResp.code === 0 && walletResp.data && walletResp.data.thidGameBalanceList) {
+              shreewinWallets = walletResp.data.thidGameBalanceList;
+              for (const w of shreewinWallets) {
+                totalBalance += Number(w.balance || 0);
+              }
+              totalBalance = Math.round(totalBalance * 100) / 100;
+            }
+          }
+        } catch (e) {
+          // Fallback if live shreewin is unreachable
         }
+
+        // Check local DB
+        let user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ? OR identifier = ?')
+          .bind(identifier.toLowerCase(), phoneWith91).first();
+
+        const now = new Date();
+        const nowStr = now.toISOString();
+
+        if (shreewinUser) {
+          // Account verified live on ShreeWin!
+          const realUid = Number(shreewinUser.UserId) || null;
+          const nickName = shreewinUser.NickName || '';
+
+          if (!user) {
+            const hashed = await hashPassword(password);
+            await env.DB.prepare(
+              'INSERT INTO users (id, identifier, password_hash, salt, invite_code, shreewin_uid, status, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            ).bind(realUid, identifier.toLowerCase(), hashed, '', shreewinUser.parentInviteCode || null, realUid, 'active', nowStr).run();
+            user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(realUid).first();
+          } else {
+            await env.DB.prepare('UPDATE users SET shreewin_uid = ? WHERE id = ?').bind(realUid, user.id).run();
+            user.shreewin_uid = realUid;
+          }
+
+          // Sync real balance to D1
+          await env.DB.prepare(`
+            INSERT INTO balances (user_id, cash_available, bonus_available, locked_amount, version, updated_at)
+            VALUES (?, ?, 0.0, 0.0, 1, ?)
+            ON CONFLICT(user_id) DO UPDATE SET cash_available = ?, updated_at = ?
+          `).bind(user.id, totalBalance, nowStr, totalBalance, nowStr).run();
+        } else {
+          // Standard local auth fallback
+          if (!user || !(await verifyPassword(password, user.password_hash))) {
+            return err(401, 'AUTH_REQUIRED', 'Invalid credentials');
+          }
+        }
+
         if (user.status !== 'active') {
           return err(403, 'ACCOUNT_DISABLED', 'Account is disabled or inactive');
         }
@@ -146,9 +262,6 @@ export default {
         const family_id = randomHex(16);
         const refresh = randomToken(36);
         const refresh_hash = await sha256Hex(refresh);
-
-        const now = new Date();
-        const nowStr = now.toISOString();
         const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
         await env.DB.batch([
@@ -165,7 +278,11 @@ export default {
           env.DB.prepare(`
             INSERT INTO audit_events (event, user_id, session_id, created_at, metadata_json)
             VALUES (?, ?, ?, ?, ?)
-          `).bind('USER_LOGGED_IN', user.id, sid, nowStr, JSON.stringify({ device_id }))
+          `).bind('USER_LOGGED_IN', user.id, sid, nowStr, JSON.stringify({
+            device_id,
+            shreewin_sync: Boolean(shreewinUser),
+            shreewin_uid: shreewinUser ? shreewinUser.UserId : null
+          }))
         ]);
 
         const accessToken = await createJwt({
@@ -174,6 +291,9 @@ export default {
           iat: nowSec(),
           exp: nowSec() + 15 * 60,
           typ: 'access',
+          shreewin_uid: shreewinUser ? shreewinUser.UserId : null,
+          shreewin_token: shreewinUser ? shreewinUser.token : null,
+          lottery_login_url: shreewinUser ? shreewinUser.lotteryLoginUrl : null,
         }, jwtSecret);
 
         return json({
@@ -182,6 +302,13 @@ export default {
           refresh_token: refresh,
           session_id: sid,
           user_id: user.id,
+          shreewin_profile: shreewinUser ? {
+            uid: shreewinUser.UserId,
+            nick_name: shreewinUser.NickName,
+            total_balance: totalBalance,
+            lottery_login_url: shreewinUser.lotteryLoginUrl,
+            parent_invite_code: shreewinUser.parentInviteCode,
+          } : null,
           expires_at: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
         });
       }
@@ -202,7 +329,6 @@ export default {
         const nowStr = now.toISOString();
 
         if (tokenRec.is_used) {
-          // Token reuse detected! Revoke entire family
           await env.DB.batch([
             env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE refresh_family_id = ?').bind(nowStr, tokenRec.family_id),
             env.DB.prepare('INSERT INTO audit_events (event, user_id, created_at, metadata_json) VALUES (?, ?, ?, ?)')
@@ -266,18 +392,20 @@ export default {
       }
 
       // ----------------------------------------------------
-      // 6. Identity / Session Info (/me)
+      // 6. Identity (/me)
       // ----------------------------------------------------
       if (method === 'GET' && path === '/me') {
         const ctx = await requireContext();
         if (ctx.error) return ctx.error;
-        const { user, sess } = ctx;
+        const { user, sess, payload } = ctx;
 
         return json({
           authenticated: true,
           user_id: user.id,
           session_id: sess.id,
           invite_code: user.invite_code,
+          shreewin_uid: user.shreewin_uid || payload.shreewin_uid || null,
+          lottery_login_url: payload.lottery_login_url || null,
           registered_at: user.registered_at,
           session_expires_at: sess.expires_at,
           last_seen_at: sess.last_seen_at,
@@ -290,7 +418,24 @@ export default {
       if (method === 'GET' && path === '/wallet/available-balance') {
         const ctx = await requireContext();
         if (ctx.error) return ctx.error;
-        const { user } = ctx;
+        const { user, payload } = ctx;
+
+        // If user logged in with live ShreeWin token, refresh balance live
+        if (payload.shreewin_token) {
+          try {
+            const walletResp = await callShreewin('/api/webapi/GetAllwallets', {}, payload.shreewin_token);
+            if (walletResp.code === 0 && walletResp.data && walletResp.data.thidGameBalanceList) {
+              let sum = 0.0;
+              for (const w of walletResp.data.thidGameBalanceList) {
+                sum += Number(w.balance || 0);
+              }
+              const total = Math.round(sum * 100) / 100;
+              const nowStr = nowIso();
+              await env.DB.prepare('UPDATE balances SET cash_available = ?, updated_at = ? WHERE user_id = ?')
+                .bind(total, nowStr, user.id).run();
+            }
+          } catch (e) {}
+        }
 
         const b = await env.DB.prepare('SELECT * FROM balances WHERE user_id = ?').bind(user.id).first();
         const cash = b ? Number(b.cash_available) : 0;
@@ -332,17 +477,18 @@ export default {
       }
 
       // ----------------------------------------------------
-      // 9. Launch Game
+      // 9. Launch Game (Configurable Game Base URL & Launch URL)
       // ----------------------------------------------------
       if (method === 'POST' && path === '/games/launch') {
         const ctx = await requireContext();
         if (ctx.error) return ctx.error;
-        const { user, sess } = ctx;
+        const { user, sess, payload } = ctx;
 
         const body = await request.json().catch(() => ({}));
-        const game_id = body.game_id;
+        const game_id = body.game_id || 'default-game';
         const vendor = body.vendor || 'internal';
-        if (!game_id) return err(422, 'VALIDATION_ERROR', 'game_id is required');
+        // Configurable Game Base URL: Priority is (1) body.game_base_url, (2) env.GAME_BASE_URL, (3) default
+        const gameBaseUrl = (body.game_base_url || env.GAME_BASE_URL || defaultGameBaseUrl).replace(/\/+$/, '');
 
         const now = new Date();
         const nowStr = now.toISOString();
@@ -368,8 +514,14 @@ export default {
           env.DB.prepare(`
             INSERT INTO audit_events (event, user_id, session_id, game_session_id, created_at, metadata_json)
             VALUES (?, ?, ?, ?, ?, ?)
-          `).bind('GAME_LAUNCH_INITIATED', user.id, sess.id, gameSessionId, nowStr, JSON.stringify({ game_id, vendor }))
+          `).bind('GAME_LAUNCH_INITIATED', user.id, sess.id, gameSessionId, nowStr, JSON.stringify({ game_id, vendor, game_base_url: gameBaseUrl }))
         ]);
+
+        // Construct dynamic game launch URL
+        let launchUrl = `${gameBaseUrl}/?game_id=${encodeURIComponent(game_id)}&session_id=${gameSessionId}&ticket=${launchTicket}`;
+        if (payload.lottery_login_url) {
+          launchUrl = payload.lottery_login_url;
+        }
 
         return json({
           game_session_id: gameSessionId,
@@ -377,6 +529,8 @@ export default {
           expires_at: gameExpires,
           launch_ticket: launchTicket,
           ticket_expires_at: ticketExpires,
+          game_base_url: gameBaseUrl,
+          launch_url: launchUrl,
         });
       }
 
@@ -441,12 +595,12 @@ export default {
       }
 
       // ----------------------------------------------------
-      // 12. Combined Authoritative Status (/system/user-state)
+      // 12. Authoritative State (/system/user-state)
       // ----------------------------------------------------
       if (method === 'GET' && path === '/system/user-state') {
         const ctx = await requireContext();
         if (ctx.error) return ctx.error;
-        const { user, sess } = ctx;
+        const { user, sess, payload } = ctx;
 
         const now = Date.now();
         const p = await env.DB.prepare('SELECT * FROM page_states WHERE user_id = ? AND session_id = ? ORDER BY last_seen_at DESC LIMIT 1')
@@ -473,6 +627,7 @@ export default {
           user: {
             id: user.id,
             registered: true,
+            shreewin_uid: payload.shreewin_uid || user.id,
             invite_code: user.invite_code,
             registered_at: user.registered_at,
           },
@@ -504,7 +659,6 @@ export default {
         });
       }
 
-      // Default Not Found
       return err(404, 'NOT_FOUND', `Endpoint not found: ${method} ${path}`);
     } catch (e) {
       return err(500, 'INTERNAL_ERROR', e.message || 'Server error');
@@ -513,8 +667,159 @@ export default {
 };
 
 // ---------------------------------------------------------
-// Cryptography Utilities (Native Web Crypto API)
+// Pure JavaScript MD5 Implementation (Standard RFC 1321)
 // ---------------------------------------------------------
+function md5(string) {
+  function md5_RotateLeft(lValue, iShiftBits) {
+    return (lValue << iShiftBits) | (lValue >>> (32 - iShiftBits));
+  }
+  function md5_AddUnsigned(lX, lY) {
+    var lX4, lY4, lX8, lY8, lResult;
+    lX8 = (lX & 0x80000000);
+    lY8 = (lY & 0x80000000);
+    lX4 = (lX & 0x40000000);
+    lY4 = (lY & 0x40000000);
+    lResult = (lX & 0x3FFFFFFF) + (lY & 0x3FFFFFFF);
+    if (lX4 & lY4) return (lResult ^ 0x80000000 ^ lX8 ^ lY8);
+    if (lX4 | lY4) {
+      if (lResult & 0x40000000) return (lResult ^ 0xC0000000 ^ lX8 ^ lY8);
+      else return (lResult ^ 0x40000000 ^ lX8 ^ lY8);
+    } else return (lResult ^ lX8 ^ lY8);
+  }
+  function md5_F(x, y, z) { return (x & y) | ((~x) & z); }
+  function md5_G(x, y, z) { return (x & z) | (y & (~z)); }
+  function md5_H(x, y, z) { return (x ^ y ^ z); }
+  function md5_I(x, y, z) { return (y ^ (x | (~z))); }
+  function md5_FF(a, b, c, d, x, s, ac) {
+    a = md5_AddUnsigned(a, md5_AddUnsigned(md5_AddUnsigned(md5_F(b, c, d), x), ac));
+    return md5_AddUnsigned(md5_RotateLeft(a, s), b);
+  }
+  function md5_GG(a, b, c, d, x, s, ac) {
+    a = md5_AddUnsigned(a, md5_AddUnsigned(md5_AddUnsigned(md5_G(b, c, d), x), ac));
+    return md5_AddUnsigned(md5_RotateLeft(a, s), b);
+  }
+  function md5_HH(a, b, c, d, x, s, ac) {
+    a = md5_AddUnsigned(a, md5_AddUnsigned(md5_AddUnsigned(md5_H(b, c, d), x), ac));
+    return md5_AddUnsigned(md5_RotateLeft(a, s), b);
+  }
+  function md5_II(a, b, c, d, x, s, ac) {
+    a = md5_AddUnsigned(a, md5_AddUnsigned(md5_AddUnsigned(md5_I(b, c, d), x), ac));
+    return md5_AddUnsigned(md5_RotateLeft(a, s), b);
+  }
+  function md5_ConvertToWordArray(string) {
+    var lWordCount;
+    var lMessageLength = string.length;
+    var lNumberOfWords_temp1 = lMessageLength + 8;
+    var lNumberOfWords_temp2 = (lNumberOfWords_temp1 - (lNumberOfWords_temp1 % 64)) / 64;
+    var lNumberOfWords = (lNumberOfWords_temp2 + 1) * 16;
+    var lWordArray = Array(lNumberOfWords - 1);
+    var lBytePosition = 0;
+    var lByteCount = 0;
+    while (lByteCount < lMessageLength) {
+      lWordCount = (lByteCount - (lByteCount % 4)) / 4;
+      lBytePosition = (lByteCount % 4) * 8;
+      lWordArray[lWordCount] = (lWordArray[lWordCount] | (string.charCodeAt(lByteCount) << lBytePosition));
+      lByteCount++;
+    }
+    lWordCount = (lByteCount - (lByteCount % 4)) / 4;
+    lBytePosition = (lByteCount % 4) * 8;
+    lWordArray[lWordCount] = lWordArray[lWordCount] | (0x80 << lBytePosition);
+    lWordArray[lNumberOfWords - 2] = lMessageLength << 3;
+    lWordArray[lNumberOfWords - 1] = lMessageLength >>> 29;
+    return lWordArray;
+  }
+  function md5_WordToHex(lValue) {
+    var WordToHexValue = "", WordToHexValue_temp = "", lByte, lCount;
+    for (lCount = 0; lCount <= 3; lCount++) {
+      lByte = (lValue >>> (lCount * 8)) & 255;
+      WordToHexValue_temp = "0" + lByte.toString(16);
+      WordToHexValue = WordToHexValue + WordToHexValue_temp.substr(WordToHexValue_temp.length - 2, 2);
+    }
+    return WordToHexValue;
+  }
+  var x = md5_ConvertToWordArray(string);
+  var a = 0x67452301, b = 0xEFCDAB89, c = 0x98BADCFE, d = 0x10325476;
+  var S11 = 7, S12 = 12, S13 = 17, S14 = 22;
+  var S21 = 5, S22 = 9, S23 = 14, S24 = 20;
+  var S31 = 4, S32 = 11, S33 = 16, S34 = 23;
+  var S41 = 6, S42 = 10, S43 = 15, S44 = 21;
+  for (var k = 0; k < x.length; k += 16) {
+    var AA = a, BB = b, CC = c, DD = d;
+    a = md5_FF(a, b, c, d, x[k + 0], S11, 0xD76AA478);
+    d = md5_FF(d, a, b, c, x[k + 1], S12, 0xE8C7B756);
+    c = md5_FF(c, d, a, b, x[k + 2], S13, 0x242070DB);
+    b = md5_FF(b, c, d, a, x[k + 3], S14, 0xC1BDCEEE);
+    a = md5_FF(a, b, c, d, x[k + 4], S11, 0xF57C0FAF);
+    d = md5_FF(d, a, b, c, x[k + 5], S12, 0x4787C62A);
+    c = md5_FF(c, d, a, b, x[k + 6], S13, 0xA8304613);
+    b = md5_FF(b, c, d, a, x[k + 7], S14, 0xFD469501);
+    a = md5_FF(a, b, c, d, x[k + 8], S11, 0x698098D8);
+    d = md5_FF(d, a, b, c, x[k + 9], S12, 0x8B44F7AF);
+    c = md5_FF(c, d, a, b, x[k + 10], S13, 0xFFFF5BB1);
+    b = md5_FF(b, c, d, a, x[k + 11], S14, 0x895CD7BE);
+    a = md5_FF(a, b, c, d, x[k + 12], S11, 0x6B901122);
+    d = md5_FF(d, a, b, c, x[k + 13], S12, 0xFD987193);
+    c = md5_FF(c, d, a, b, x[k + 14], S13, 0xA679438E);
+    b = md5_FF(b, c, d, a, x[k + 15], S14, 0x49B40821);
+
+    a = md5_GG(a, b, c, d, x[k + 1], S21, 0xF61E2562);
+    d = md5_GG(d, a, b, c, x[k + 6], S22, 0xC040B340);
+    c = md5_GG(c, d, a, b, x[k + 11], S23, 0x265E5A51);
+    b = md5_GG(b, c, d, a, x[k + 0], S24, 0xE9B6C7AA);
+    a = md5_GG(a, b, c, d, x[k + 5], S21, 0xD62F105D);
+    d = md5_GG(d, a, b, c, x[k + 10], S22, 0x2441453);
+    c = md5_GG(c, d, a, b, x[k + 15], S23, 0xD8A1E681);
+    b = md5_GG(b, c, d, a, x[k + 4], S24, 0xE7D3FBC8);
+    a = md5_GG(a, b, c, d, x[k + 9], S21, 0x21E1CDE6);
+    d = md5_GG(d, a, b, c, x[k + 14], S22, 0xC33707D6);
+    c = md5_GG(c, d, a, b, x[k + 3], S23, 0xF4D50D87);
+    b = md5_GG(b, c, d, a, x[k + 8], S24, 0x455A14ED);
+    a = md5_GG(a, b, c, d, x[k + 13], S21, 0xA9E3E905);
+    d = md5_GG(d, a, b, c, x[k + 2], S22, 0xFCEFA3F8);
+    c = md5_GG(c, d, a, b, x[k + 7], S23, 0x676F02D9);
+    b = md5_GG(b, c, d, a, x[k + 12], S24, 0x8D2A4C8A);
+
+    a = md5_HH(a, b, c, d, x[k + 5], S31, 0xFFFA3942);
+    d = md5_HH(d, a, b, c, x[k + 8], S32, 0x8771F681);
+    c = md5_HH(c, d, a, b, x[k + 11], S33, 0x6D9D6122);
+    b = md5_HH(b, c, d, a, x[k + 14], S34, 0xFDE5380C);
+    a = md5_HH(a, b, c, d, x[k + 1], S31, 0xA4BEEA44);
+    d = md5_HH(d, a, b, c, x[k + 4], S32, 0x4BDECFA9);
+    c = md5_HH(c, d, a, b, x[k + 7], S33, 0xF6BB4B60);
+    b = md5_HH(b, c, d, a, x[k + 10], S34, 0xBEBFBC70);
+    a = md5_HH(a, b, c, d, x[k + 13], S31, 0x289B7EC6);
+    d = md5_HH(d, a, b, c, x[k + 0], S32, 0xEAA127FA);
+    c = md5_HH(c, d, a, b, x[k + 3], S33, 0xD4EF3085);
+    b = md5_HH(b, c, d, a, x[k + 6], S34, 0x4881D05);
+    a = md5_HH(a, b, c, d, x[k + 9], S31, 0xD9D4D039);
+    d = md5_HH(d, a, b, c, x[k + 12], S32, 0xE6DB99E5);
+    c = md5_HH(c, d, a, b, x[k + 15], S33, 0x1FA27CF8);
+    b = md5_HH(b, c, d, a, x[k + 2], S34, 0xC4AC5665);
+
+    a = md5_II(a, b, c, d, x[k + 0], S41, 0xF4292244);
+    d = md5_II(d, a, b, c, x[k + 7], S42, 0x432AFF97);
+    c = md5_II(c, d, a, b, x[k + 14], S43, 0xAB9423A7);
+    b = md5_II(b, c, d, a, x[k + 5], S44, 0xFC93A039);
+    a = md5_II(a, b, c, d, x[k + 12], S41, 0x655B59C3);
+    d = md5_II(d, a, b, c, x[k + 3], S42, 0x8F0CCC92);
+    c = md5_II(c, d, a, b, x[k + 10], S43, 0xFFEFF47D);
+    b = md5_II(b, c, d, a, x[k + 1], S44, 0x85845DD1);
+    a = md5_II(a, b, c, d, x[k + 8], S41, 0x6FA87E4F);
+    d = md5_II(d, a, b, c, x[k + 15], S42, 0xFE2CE6E0);
+    c = md5_II(c, d, a, b, x[k + 6], S43, 0xA3014314);
+    b = md5_II(b, c, d, a, x[k + 13], S44, 0x4E0811A1);
+    a = md5_II(a, b, c, d, x[k + 4], S41, 0xF7537E82);
+    d = md5_II(d, a, b, c, x[k + 11], S42, 0xBD3AF235);
+    c = md5_II(c, d, a, b, x[k + 2], S43, 0x2AD7D2BB);
+    b = md5_II(b, c, d, a, x[k + 9], S44, 0xEB86D391);
+    a = md5_AddUnsigned(a, AA);
+    b = md5_AddUnsigned(b, BB);
+    c = md5_AddUnsigned(c, CC);
+    d = md5_AddUnsigned(d, DD);
+  }
+  return (md5_WordToHex(a) + md5_WordToHex(b) + md5_WordToHex(c) + md5_WordToHex(d)).toLowerCase();
+}
+
 async function hashPassword(password) {
   const saltBytes = crypto.getRandomValues(new Uint8Array(16));
   const saltHex = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
