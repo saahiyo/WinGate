@@ -1026,10 +1026,17 @@ export default {
           try { return JSON.parse(val || '[]'); } catch (_) { return []; }
         };
 
+        const minBal = (cfg.min_unlock_balance !== undefined && cfg.min_unlock_balance !== null)
+          ? Number(cfg.min_unlock_balance)
+          : 50.0;
+        const isUnlockWithoutDeposit = Boolean(cfg.unlock_without_deposit || minBal <= 0);
+
         return json({
           channel: cfg.channel,
           app_active: Boolean(cfg.app_active),
-          min_unlock_balance: Number(cfg.min_unlock_balance || 50.0),
+          min_unlock_balance: minBal,
+          unlock_without_deposit: isUnlockWithoutDeposit,
+          global_unlock: isUnlockWithoutDeposit,
           whitelisted_users: parseJsonList(cfg.whitelisted_users),
           blacklisted_users: parseJsonList(cfg.blacklisted_users),
           broadcast_notice: cfg.broadcast_notice,
@@ -1070,7 +1077,12 @@ export default {
         } catch (_) { v = '2.0.1'; }
 
         const app_active = body.app_active !== undefined ? (body.app_active ? 1 : 0) : (cfg ? cfg.app_active : 1);
-        const min_bal = body.min_unlock_balance !== undefined ? Number(body.min_unlock_balance) : (cfg ? cfg.min_unlock_balance : 50.0);
+        const min_bal = (body.min_unlock_balance !== undefined && body.min_unlock_balance !== null)
+          ? Number(body.min_unlock_balance)
+          : ((cfg && cfg.min_unlock_balance !== undefined && cfg.min_unlock_balance !== null) ? Number(cfg.min_unlock_balance) : 50.0);
+        const unlock_without_dep = body.unlock_without_deposit !== undefined
+          ? (body.unlock_without_deposit ? 1 : 0)
+          : (body.global_unlock !== undefined ? (body.global_unlock ? 1 : 0) : (cfg ? (cfg.unlock_without_deposit || 0) : 0));
         const wl = body.whitelisted_users !== undefined ? JSON.stringify(body.whitelisted_users) : (cfg ? cfg.whitelisted_users : '[]');
         const bl = body.blacklisted_users !== undefined ? JSON.stringify(body.blacklisted_users) : (cfg ? cfg.blacklisted_users : '[]');
         const notice = body.broadcast_notice !== undefined ? body.broadcast_notice : (cfg ? cfg.broadcast_notice : 'Welcome • Signals are entertainment only');
@@ -1085,11 +1097,12 @@ export default {
         const lock = body.strict_reg_lock !== undefined ? (body.strict_reg_lock ? 1 : 0) : (cfg ? cfg.strict_reg_lock : 0);
 
         await env.DB.prepare(`
-          INSERT INTO app_configs (channel, app_active, min_unlock_balance, whitelisted_users, blacklisted_users, broadcast_notice, broadcast_priority, deposit_url, register_url, bubble_icon_url, branding_panel_name, branding_bubble_label, branding_theme_color, win_feed_enabled, strict_reg_lock, version, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO app_configs (channel, app_active, min_unlock_balance, unlock_without_deposit, whitelisted_users, blacklisted_users, broadcast_notice, broadcast_priority, deposit_url, register_url, bubble_icon_url, branding_panel_name, branding_bubble_label, branding_theme_color, win_feed_enabled, strict_reg_lock, version, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(channel) DO UPDATE SET
             app_active = excluded.app_active,
             min_unlock_balance = excluded.min_unlock_balance,
+            unlock_without_deposit = excluded.unlock_without_deposit,
             whitelisted_users = excluded.whitelisted_users,
             blacklisted_users = excluded.blacklisted_users,
             broadcast_notice = excluded.broadcast_notice,
@@ -1104,7 +1117,7 @@ export default {
             strict_reg_lock = excluded.strict_reg_lock,
             version = excluded.version,
             updated_at = excluded.updated_at
-        `).bind(chan, app_active, min_bal, wl, bl, notice, prio, dep, reg, icon, pName, bLabel, theme, feed, lock, v, nowStr).run();
+        `).bind(chan, app_active, min_bal, unlock_without_dep, wl, bl, notice, prio, dep, reg, icon, pName, bLabel, theme, feed, lock, v, nowStr).run();
 
         const updated = await env.DB.prepare('SELECT * FROM app_configs WHERE channel = ?').bind(chan).first();
         return json({
@@ -1114,6 +1127,8 @@ export default {
             channel: updated.channel,
             app_active: Boolean(updated.app_active),
             min_unlock_balance: Number(updated.min_unlock_balance),
+            unlock_without_deposit: Boolean(updated.unlock_without_deposit || updated.min_unlock_balance <= 0),
+            global_unlock: Boolean(updated.unlock_without_deposit || updated.min_unlock_balance <= 0),
             whitelisted_users: JSON.parse(updated.whitelisted_users || '[]'),
             blacklisted_users: JSON.parse(updated.blacklisted_users || '[]'),
             broadcast_notice: updated.broadcast_notice,

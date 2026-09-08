@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS app_configs (
     channel TEXT PRIMARY KEY,
     app_active INTEGER DEFAULT 1,
     min_unlock_balance REAL DEFAULT 50.0,
+    unlock_without_deposit INTEGER DEFAULT 0,
     whitelisted_users TEXT DEFAULT '[]',
     blacklisted_users TEXT DEFAULT '[]',
     broadcast_notice TEXT DEFAULT 'Welcome • Signals are entertainment only • 18+ play responsibly',
