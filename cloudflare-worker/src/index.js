@@ -1441,6 +1441,160 @@ export default {
         });
       }
 
+      // ====================================================
+      // 16. OTA Dynamic Script Hot-Patching (/app/scripts/:name, /admin/scripts/:name)
+      // ====================================================
+      if (method === 'GET' && path.startsWith('/app/scripts/')) {
+        const scriptName = path.replace('/app/scripts/', '').trim();
+        const row = await env.DB.prepare('SELECT * FROM app_scripts WHERE name = ?').bind(scriptName).first();
+
+        let content = '';
+        let version = 1;
+        let sha = '';
+
+        if (row) {
+          content = row.content;
+          version = row.version;
+          sha = row.sha256;
+        } else {
+          if (scriptName === 'game_hook.js') {
+            content = '// ShreeWin Game Hook v2.1.0 (WinGate Remote Authoritative)\n(function() { console.log("[WinGate] Remote Game Hook Active"); })();\n';
+          } else if (scriptName === 'nexy.html') {
+            content = '<!-- ShreeWin NEXY HUD v2.1.0 (WinGate Remote Authoritative) -->\n<div id="nexy-root" style="display:none;"></div>\n';
+          } else {
+            return err(404, 'SCRIPT_NOT_FOUND', `Script ${scriptName} not found`);
+          }
+          sha = await sha256Hex(content);
+          version = 1;
+        }
+
+        const etag = `"${sha}"`;
+        const clientEtag = request.headers.get('If-None-Match');
+        if (clientEtag && (clientEtag === etag || clientEtag.replace(/"/g, '') === sha)) {
+          return new Response(null, { status: 304, headers: corsHeaders });
+        }
+
+        const contentType = scriptName.endsWith('.js') ? 'application/javascript; charset=utf-8' : (scriptName.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8');
+        return new Response(content, {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': contentType,
+            'ETag': etag,
+            'X-Script-Version': String(version),
+            'X-Script-SHA256': sha,
+            'Cache-Control': 'no-cache, must-revalidate',
+          }
+        });
+      }
+
+      if (method === 'POST' && path.startsWith('/admin/scripts/')) {
+        const scriptName = path.replace('/admin/scripts/', '').trim();
+        const body = await request.json().catch(() => ({}));
+        if (!body.content) {
+          return err(400, 'CONTENT_REQUIRED', 'Missing script content');
+        }
+
+        const sha = await sha256Hex(body.content);
+        const existing = await env.DB.prepare('SELECT version FROM app_scripts WHERE name = ?').bind(scriptName).first();
+        const nextVersion = existing ? (Number(existing.version || 1) + 1) : 1;
+        const nowStr = nowIso();
+
+        await env.DB.prepare(`
+          INSERT INTO app_scripts (name, content, version, sha256, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(name) DO UPDATE SET
+            content = excluded.content,
+            version = excluded.version,
+            sha256 = excluded.sha256,
+            updated_at = excluded.updated_at
+        `).bind(scriptName, body.content, nextVersion, sha, nowStr).run();
+
+        return json({
+          success: true,
+          name: scriptName,
+          version: nextVersion,
+          sha256: sha,
+          updated_at: nowStr,
+        });
+      }
+
+      // ====================================================
+      // 17. In-App APK Auto-Updater (/app/version-check, /admin/app-releases)
+      // ====================================================
+      if (method === 'GET' && path === '/app/version-check') {
+        const flavor = (url.searchParams.get('flavor') || 'v1').trim().toLowerCase();
+        const currentCode = parseInt(url.searchParams.get('version_code') || '1', 10);
+
+        const latest = await env.DB.prepare('SELECT * FROM app_releases WHERE flavor = ? ORDER BY version_code DESC LIMIT 1').bind(flavor).first();
+
+        if (!latest) {
+          return json({
+            has_update: false,
+            force_update: false,
+            current_version_code: currentCode,
+            latest_version_code: currentCode,
+            latest_version_name: '1.3.0',
+            download_url: '',
+            changelog: 'Up to date',
+            sha256: null,
+          });
+        }
+
+        const hasUpdate = Number(latest.version_code) > currentCode;
+        return json({
+          has_update: hasUpdate,
+          force_update: hasUpdate && Boolean(latest.force_update),
+          current_version_code: currentCode,
+          latest_version_code: Number(latest.version_code),
+          latest_version_name: latest.version_name,
+          download_url: hasUpdate ? latest.download_url : '',
+          changelog: latest.changelog || '',
+          sha256: latest.sha256,
+          created_at: latest.created_at,
+        });
+      }
+
+      if (method === 'POST' && path === '/admin/app-releases') {
+        const body = await request.json().catch(() => ({}));
+        const flavor = (body.flavor || 'v1').trim().toLowerCase();
+        const versionCode = parseInt(body.version_code || '1', 10);
+        const versionName = String(body.version_name || '1.3.0').trim();
+        const forceUpdate = Boolean(body.force_update);
+        const downloadUrl = String(body.download_url || '').trim();
+        const changelog = String(body.changelog || '').trim();
+        const sha = body.sha256 ? String(body.sha256).trim() : null;
+        const relId = `${flavor}_${versionCode}`;
+        const nowStr = nowIso();
+
+        await env.DB.prepare(`
+          INSERT INTO app_releases (id, flavor, version_code, version_name, force_update, download_url, changelog, sha256, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            version_name = excluded.version_name,
+            force_update = excluded.force_update,
+            download_url = excluded.download_url,
+            changelog = excluded.changelog,
+            sha256 = excluded.sha256
+        `).bind(relId, flavor, versionCode, versionName, forceUpdate ? 1 : 0, downloadUrl, changelog, sha, nowStr).run();
+
+        const saved = await env.DB.prepare('SELECT * FROM app_releases WHERE id = ?').bind(relId).first();
+        return json({
+          success: true,
+          release: {
+            id: saved.id,
+            flavor: saved.flavor,
+            version_code: Number(saved.version_code),
+            version_name: saved.version_name,
+            force_update: Boolean(saved.force_update),
+            download_url: saved.download_url,
+            changelog: saved.changelog,
+            sha256: saved.sha256,
+            created_at: saved.created_at,
+          }
+        });
+      }
+
       return err(404, 'NOT_FOUND', `Endpoint not found: ${method} ${path}`);
 
     } catch (e) {

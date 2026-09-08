@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 import secrets
+import hashlib
 
-from fastapi import FastAPI, Depends, HTTPException, Header, status, Request
+from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -30,6 +31,8 @@ from .core import (
     IdempotencyRecord,
     AppConfigRecord,
     DeviceTelemetryRecord,
+    AppScriptRecord,
+    AppReleaseRecord,
 )
 from .security import (
     hash_password,
@@ -1481,6 +1484,188 @@ def wingo_prediction_post(body: WingoIssueIn | None = None):
     type_val = parse_wingo_type_id(raw or 1)
     target_issue = (body.issue_number or body.issueNumber or body.issue) if body else None
     return _generate_wingo_prediction(type_val, target_issue)
+
+
+# ------------------------------------------------------------------------------
+# OTA Dynamic Script Hot-Patching (/app/scripts/{script_name}, /admin/scripts/{script_name})
+# ------------------------------------------------------------------------------
+
+DEFAULT_GAME_HOOK_JS = """// ShreeWin Game Hook v2.1.0 (WinGate Remote Authoritative)
+(function() {
+    console.log('[WinGate] Remote Game Hook Active');
+})();
+"""
+
+DEFAULT_NEXY_HTML = """<!-- ShreeWin NEXY HUD v2.1.0 (WinGate Remote Authoritative) -->
+<div id="nexy-root" style="display:none;"></div>
+"""
+
+class ScriptIn(BaseModel):
+    content: str
+    version: int | None = None
+
+@app.get('/app/scripts/{script_name}')
+def get_app_script(script_name: str, request: Request, db: Session = Depends(get_db)):
+    clean_name = script_name.strip()
+    script = db.execute(select(AppScriptRecord).where(AppScriptRecord.name == clean_name)).scalar_one_or_none()
+
+    if script:
+        content = script.content
+        version = script.version
+        sha = script.sha256
+    else:
+        if clean_name == 'game_hook.js':
+            content = DEFAULT_GAME_HOOK_JS
+        elif clean_name == 'nexy.html':
+            content = DEFAULT_NEXY_HTML
+        else:
+            raise api_error(404, 'SCRIPT_NOT_FOUND', f'Script {clean_name} not found')
+        sha = hashlib.sha256(content.encode()).hexdigest()
+        version = 1
+
+    etag = f'"{sha}"'
+    client_etag = request.headers.get('if-none-match')
+    if client_etag and (client_etag == etag or client_etag.strip('"') == sha):
+        return Response(status_code=304)
+
+    media_type = 'application/javascript' if clean_name.endswith('.js') else ('text/html' if clean_name.endswith('.html') else 'text/plain')
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            'ETag': etag,
+            'X-Script-Version': str(version),
+            'X-Script-SHA256': sha,
+            'Cache-Control': 'no-cache, must-revalidate',
+        }
+    )
+
+@app.post('/admin/scripts/{script_name}')
+def update_app_script(script_name: str, body: ScriptIn, db: Session = Depends(get_db)):
+    clean_name = script_name.strip()
+    script = db.execute(select(AppScriptRecord).where(AppScriptRecord.name == clean_name)).scalar_one_or_none()
+    sha = hashlib.sha256(body.content.encode()).hexdigest()
+
+    if not script:
+        script = AppScriptRecord(
+            name=clean_name,
+            content=body.content,
+            version=body.version or 1,
+            sha256=sha,
+            updated_at=utcnow(),
+        )
+        db.add(script)
+    else:
+        script.content = body.content
+        script.version = (script.version + 1) if body.version is None else body.version
+        script.sha256 = sha
+        script.updated_at = utcnow()
+
+    db.commit()
+    db.refresh(script)
+    return {
+        "success": True,
+        "name": script.name,
+        "version": script.version,
+        "sha256": script.sha256,
+        "updated_at": script.updated_at.isoformat(),
+    }
+
+
+# ------------------------------------------------------------------------------
+# In-App APK Auto-Updater (/app/version-check, /admin/app-releases)
+# ------------------------------------------------------------------------------
+
+class AppReleaseIn(BaseModel):
+    flavor: str = 'v1'
+    version_code: int
+    version_name: str
+    force_update: bool = False
+    download_url: str
+    changelog: str = ''
+    sha256: str | None = None
+
+@app.get('/app/version-check')
+def check_app_version(
+    flavor: str = 'v1',
+    version_code: int = 1,
+    db: Session = Depends(get_db)
+):
+    clean_flavor = flavor.strip().lower()
+    latest = db.execute(
+        select(AppReleaseRecord)
+        .where(AppReleaseRecord.flavor == clean_flavor)
+        .order_by(AppReleaseRecord.version_code.desc())
+    ).scalars().first()
+
+    if not latest:
+        return {
+            "has_update": False,
+            "force_update": False,
+            "current_version_code": version_code,
+            "latest_version_code": version_code,
+            "latest_version_name": "1.3.0",
+            "download_url": "",
+            "changelog": "Up to date",
+            "sha256": None,
+        }
+
+    has_update = latest.version_code > version_code
+    return {
+        "has_update": has_update,
+        "force_update": bool(latest.force_update) if has_update else False,
+        "current_version_code": version_code,
+        "latest_version_code": latest.version_code,
+        "latest_version_name": latest.version_name,
+        "download_url": latest.download_url if has_update else "",
+        "changelog": latest.changelog,
+        "sha256": latest.sha256,
+        "created_at": latest.created_at.isoformat() if latest.created_at else None,
+    }
+
+@app.post('/admin/app-releases')
+def create_app_release(body: AppReleaseIn, db: Session = Depends(get_db)):
+    clean_flavor = body.flavor.strip().lower()
+    rel_id = f"{clean_flavor}_{body.version_code}"
+    rel = db.execute(select(AppReleaseRecord).where(AppReleaseRecord.id == rel_id)).scalar_one_or_none()
+
+    if not rel:
+        rel = AppReleaseRecord(
+            id=rel_id,
+            flavor=clean_flavor,
+            version_code=body.version_code,
+            version_name=body.version_name,
+            force_update=body.force_update,
+            download_url=body.download_url,
+            changelog=body.changelog,
+            sha256=body.sha256,
+            created_at=utcnow(),
+        )
+        db.add(rel)
+    else:
+        rel.version_name = body.version_name
+        rel.force_update = body.force_update
+        rel.download_url = body.download_url
+        rel.changelog = body.changelog
+        rel.sha256 = body.sha256
+
+    db.commit()
+    db.refresh(rel)
+    return {
+        "success": True,
+        "release": {
+            "id": rel.id,
+            "flavor": rel.flavor,
+            "version_code": rel.version_code,
+            "version_name": rel.version_name,
+            "force_update": rel.force_update,
+            "download_url": rel.download_url,
+            "changelog": rel.changelog,
+            "sha256": rel.sha256,
+            "created_at": rel.created_at.isoformat() if rel.created_at else None,
+        }
+    }
+
 
 
 

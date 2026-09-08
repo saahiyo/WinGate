@@ -180,3 +180,26 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_user ON device_telemetry(user_id);
 CREATE INDEX IF NOT EXISTS idx_telemetry_channel ON device_telemetry(channel);
 CREATE INDEX IF NOT EXISTS idx_telemetry_last_seen ON device_telemetry(last_seen_at);
 
+CREATE TABLE IF NOT EXISTS app_scripts (
+    name TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    version INTEGER DEFAULT 1,
+    sha256 TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_releases (
+    id TEXT PRIMARY KEY,
+    flavor TEXT NOT NULL,
+    version_code INTEGER NOT NULL,
+    version_name TEXT NOT NULL,
+    force_update INTEGER DEFAULT 0,
+    download_url TEXT NOT NULL,
+    changelog TEXT DEFAULT '',
+    sha256 TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_releases_flavor ON app_releases(flavor);
+CREATE INDEX IF NOT EXISTS idx_releases_code ON app_releases(version_code);
+
+

@@ -464,5 +464,69 @@ def test_wingo_prediction_engine():
     assert d_post['prediction']['size'] in ('BIG', 'SMALL')
 
 
+def test_ota_script_hot_patching():
+    # 1. GET default script
+    r = client.get('/app/scripts/game_hook.js')
+    assert r.status_code == 200
+    assert 'Remote Game Hook' in r.text
+    etag = r.headers.get('etag')
+    assert etag is not None
+
+    # 2. ETag validation (304 Not Modified)
+    r_304 = client.get('/app/scripts/game_hook.js', headers={'If-None-Match': etag})
+    assert r_304.status_code == 304
+
+    # 3. Update script via admin
+    custom_content = "// Custom Hot Patch v2.2\nwindow.__HOT_PATCHED__ = true;"
+    r_up = client.post('/admin/scripts/game_hook.js', json={'content': custom_content})
+    assert r_up.status_code == 200
+    d_up = r_up.json()
+    assert d_up['success'] is True
+
+    # 4. Fetch updated script
+    r_new = client.get('/app/scripts/game_hook.js')
+    assert r_new.status_code == 200
+    assert 'Custom Hot Patch v2.2' in r_new.text
+    assert r_new.headers.get('etag') != etag
+
+
+def test_in_app_apk_updater():
+    # 1. Baseline version check (up to date)
+    r = client.get('/app/version-check?flavor=v1&version_code=7')
+    assert r.status_code == 200
+    d = r.json()
+    assert d['has_update'] is False
+
+    # 2. Register a new release v1.3.1 (version_code 8)
+    r_rel = client.post('/admin/app-releases', json={
+        'flavor': 'v1',
+        'version_code': 8,
+        'version_name': '1.3.1',
+        'force_update': False,
+        'download_url': 'https://pub-example.r2.dev/shreewin-v1-1.3.1.apk',
+        'changelog': '• Improved Dragon Streak engine\n• Real-time OTA hot-patching',
+        'sha256': 'abc1234567890'
+    })
+    assert r_rel.status_code == 200
+    assert r_rel.json()['success'] is True
+
+    # 3. Version check for client on version_code 7 (should flag has_update)
+    r_chk = client.get('/app/version-check?flavor=v1&version_code=7')
+    assert r_chk.status_code == 200
+    d_chk = r_chk.json()
+    assert d_chk['has_update'] is True
+    assert d_chk['force_update'] is False
+    assert d_chk['latest_version_code'] == 8
+    assert d_chk['latest_version_name'] == '1.3.1'
+    assert 'shreewin-v1-1.3.1.apk' in d_chk['download_url']
+    assert 'Dragon Streak' in d_chk['changelog']
+
+    # 4. Version check for client already on version_code 8
+    r_chk8 = client.get('/app/version-check?flavor=v1&version_code=8')
+    assert r_chk8.status_code == 200
+    assert r_chk8.json()['has_update'] is False
+
+
+
 
 

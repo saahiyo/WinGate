@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Generator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, Numeric, ForeignKey, JSON, UniqueConstraint
+from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, Numeric, ForeignKey, JSON, UniqueConstraint, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 
 class Settings(BaseSettings):
@@ -213,6 +213,26 @@ class DeviceTelemetryRecord(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     logins: Mapped[int] = mapped_column(Integer, default=1)
     total_pings: Mapped[int] = mapped_column(Integer, default=1)
+
+class AppScriptRecord(Base):
+    __tablename__ = 'app_scripts'
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    sha256: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+class AppReleaseRecord(Base):
+    __tablename__ = 'app_releases'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    flavor: Mapped[str] = mapped_column(String(32), index=True)
+    version_code: Mapped[int] = mapped_column(Integer, index=True)
+    version_name: Mapped[str] = mapped_column(String(32))
+    force_update: Mapped[bool] = mapped_column(Boolean, default=False)
+    download_url: Mapped[str] = mapped_column(String(500))
+    changelog: Mapped[str] = mapped_column(Text, default="")
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 def init_db():
     Base.metadata.create_all(engine)
