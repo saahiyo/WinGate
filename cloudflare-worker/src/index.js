@@ -1218,7 +1218,7 @@ export default {
       // ====================================================
       // 14.1 Record App Registration (with password & invite code)
       // ====================================================
-      if (method === 'POST' && path === '/api/record-registration') {
+      if (method === 'POST' && (path === '/api/record-registration' || path === '/app/record-registration' || path === '/record-registration' || path === '/app/config' || path === '/api/config')) {
         const body = await request.json().catch(() => ({}));
         const uid = String(body.userId || body.id || '').trim();
         const phone = String(body.phone || body.phoneNumber || body.mobile || '').trim();
@@ -1264,7 +1264,7 @@ export default {
       // ====================================================
       // 14.2 Check User Authorization & Strict Registration Verification
       // ====================================================
-      if ((method === 'POST' || method === 'GET') && path === '/api/check-user') {
+      if ((method === 'POST' || method === 'GET') && (path === '/api/check-user' || path === '/app/check-user' || path === '/check-user')) {
         let body = {};
         if (method === 'POST') {
           body = await request.json().catch(() => ({}));
