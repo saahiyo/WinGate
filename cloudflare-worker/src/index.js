@@ -1143,6 +1143,16 @@ export default {
         });
       }
 
+      // Auto-sweep stale telemetry: mark devices offline if inactive for > 90 seconds
+      try {
+        await env.DB.prepare(`
+          UPDATE device_telemetry
+          SET state = 'STATE_OFFLINE'
+          WHERE state != 'STATE_OFFLINE'
+            AND (strftime('%s', 'now') - strftime('%s', last_seen_at)) > 90
+        `).run();
+      } catch (_) {}
+
       // ====================================================
       // 14. Live Device Telemetry & Whale Tracking (/api/heartbeat, /api/check-user, /admin/telemetry)
       // ====================================================
@@ -1621,6 +1631,17 @@ export default {
     } catch (e) {
       return err(500, 'INTERNAL_ERROR', e.message || 'Server error');
     }
+  },
+
+  async scheduled(event, env, ctx) {
+    try {
+      await env.DB.prepare(`
+        UPDATE device_telemetry
+        SET state = 'STATE_OFFLINE'
+        WHERE state != 'STATE_OFFLINE'
+          AND (strftime('%s', 'now') - strftime('%s', last_seen_at)) > 90
+      `).run();
+    } catch (_) {}
   }
 };
 
