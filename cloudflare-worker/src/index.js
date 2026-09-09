@@ -35,7 +35,10 @@ export default {
     const nowSec = () => Math.floor(Date.now() / 1000);
 
     const minPasswordLength = parseInt(env.MIN_PASSWORD_LENGTH || '8', 10);
-    const jwtSecret = env.JWT_SECRET_KEY || 'default-secret-key-cloudflare-2026';
+    const jwtSecret = env.JWT_SECRET_KEY;
+    if (!jwtSecret || jwtSecret.length < 32) {
+      return err(500, 'SERVER_MISCONFIGURED', 'JWT_SECRET_KEY must be set to 32+ random chars');
+    }
     const pageStaleSec = parseInt(env.PAGE_STALE_SECONDS || '120', 10);
     const heartbeatGraceSec = parseInt(env.GAME_HEARTBEAT_GRACE_SECONDS || '90', 10);
     const providerApiUrl = env.PROVIDER_API_URL || env.SHREEWIN_API_URL || 'https://api.shreewinapi.com';

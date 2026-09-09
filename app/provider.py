@@ -23,17 +23,18 @@ def sign_provider_payload(data: dict[str, Any]) -> dict[str, Any]:
     t['timestamp'] = int(time.time())
     return t
 
-def call_provider_api(endpoint: str, data: dict[str, Any] | None = None, token: str | None = None) -> dict[str, Any]:
+def call_provider_api(endpoint: str, data: dict[str, Any] | None = None, token: str | None = None, client_ip: str | None = None) -> dict[str, Any]:
     payload = sign_provider_payload(data or {})
-    client_ip = '103.44.118.79'
+    # ponytail: fixed fallback IP, pass client_ip when caller has the request; per-request IP if upstream enforces it
+    ip = client_ip or '103.44.118.79'
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Origin': settings.provider_origin,
         'Referer': settings.provider_origin.rstrip('/') + '/',
         'Content-Type': 'application/json',
-        'AR-REAL-IP': client_ip,
-        'X-Real-IP': client_ip,
-        'X-Forwarded-For': client_ip,
+        'AR-REAL-IP': ip,
+        'X-Real-IP': ip,
+        'X-Forwarded-For': ip,
     }
     if token:
         headers['Authorization'] = f'Bearer {token}'

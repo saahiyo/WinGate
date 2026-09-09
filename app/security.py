@@ -47,6 +47,7 @@ def require_context(token: str = Depends(oauth2), db: Session = Depends(get_db))
         raise api_error(status.HTTP_403_FORBIDDEN, 'ACCOUNT_DISABLED', 'Account is disabled or inactive')
     if not session or session.user_id != user_id or session.revoked_at or session.expires_at <= utcnow():
         raise api_error(status.HTTP_401_UNAUTHORIZED, 'AUTH_REVOKED', 'Session is invalid or expired')
-    session.last_seen_at = utcnow()
-    db.commit()
+    if (utcnow() - session.last_seen_at).total_seconds() > 60:
+        session.last_seen_at = utcnow()
+        db.commit()
     return user, session

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = 'HS256'
     access_token_minutes: int = 15
     refresh_token_days: int = 30
-    min_password_length: int = 12
+    min_password_length: int = 8
     page_stale_seconds: int = 120
     game_heartbeat_grace_seconds: int = 90
     game_session_ttl_seconds: int = 3600
@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     def cors_origin_list(self): return [x.strip() for x in self.cors_origins.split(',') if x.strip()]
 
 settings = Settings()
+if settings.environment == "production" and (len(settings.jwt_secret_key) < 32 or "change-me" in settings.jwt_secret_key or "replace-this" in settings.jwt_secret_key):
+    raise RuntimeError("JWT_SECRET_KEY must be set to 32+ random chars in production")
 db_url = settings.database_url
 if db_url.startswith('postgres://'):
     db_url = db_url.replace('postgres://', 'postgresql+psycopg://', 1)

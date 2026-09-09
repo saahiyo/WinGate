@@ -319,6 +319,9 @@ def me(ctx=Depends(require_context)):
         'last_seen_at': sess.last_seen_at,
     }
 
+def _money(v) -> float:
+    return float(Decimal(str(v or 0)).quantize(Decimal('0.00')))
+
 @app.get('/wallet/available-balance')
 def balance(ctx=Depends(require_context), db: Session = Depends(get_db)):
     user, _ = ctx
@@ -326,10 +329,10 @@ def balance(ctx=Depends(require_context), db: Session = Depends(get_db)):
     available = Decimal(str(b.cash_available)) - Decimal(str(b.locked_amount))
     return {
         'user_id': user.id,
-        'cash_available': float(b.cash_available),
-        'bonus_available': float(b.bonus_available),
-        'locked_amount': float(b.locked_amount),
-        'available_for_game': float(max(available, Decimal('0.00'))),
+        'cash_available': _money(b.cash_available),
+        'bonus_available': _money(b.bonus_available),
+        'locked_amount': _money(b.locked_amount),
+        'available_for_game': _money(max(available, Decimal('0.00'))),
         'balance_version': b.version,
         'as_of': b.updated_at,
     }
@@ -580,10 +583,10 @@ def user_state(ctx=Depends(require_context), db: Session = Depends(get_db)):
             'state': gs.state if active_game else None,
         },
         'balance': {
-            'cash_available': float(b.cash_available),
-            'bonus_available': float(b.bonus_available),
-            'locked_amount': float(b.locked_amount),
-            'available_for_game': float(available),
+            'cash_available': _money(b.cash_available),
+            'bonus_available': _money(b.bonus_available),
+            'locked_amount': _money(b.locked_amount),
+            'available_for_game': _money(available),
             'balance_version': b.version,
             'as_of': b.updated_at,
         },
