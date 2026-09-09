@@ -1742,6 +1742,28 @@ export default {
         });
       }
 
+      // 18. In-App APK Download from R2 (/releases/*)
+      // ====================================================
+      if (method === 'GET' && path.startsWith('/releases/')) {
+        const fileKey = path.replace(/^\/releases\//, '');
+        if (!fileKey) {
+          return err(400, 'INVALID_REQUEST', 'Missing filename in /releases/<filename>');
+        }
+        if (!env.RELEASES_BUCKET) {
+          return err(500, 'SERVER_MISCONFIGURED', 'Releases R2 bucket is not configured');
+        }
+        const obj = await env.RELEASES_BUCKET.get(fileKey);
+        if (!obj) {
+          return err(404, 'NOT_FOUND', `Release file ${fileKey} not found`);
+        }
+        const headers = new Headers(corsHeaders);
+        obj.writeHttpMetadata(headers);
+        headers.set('etag', obj.httpEtag);
+        headers.set('Content-Type', 'application/vnd.android.package-archive');
+        headers.set('Content-Disposition', `attachment; filename="${fileKey}"`);
+        return new Response(obj.body, { headers });
+      }
+
       return err(404, 'NOT_FOUND', `Endpoint not found: ${method} ${path}`);
 
     } catch (e) {

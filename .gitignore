@@ -6,3 +6,5 @@ __pycache__/
 *.py[cod]
 .coverage
 htmlcov/
+.wrangler/
+node_modules/

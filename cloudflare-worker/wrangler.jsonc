@@ -23,6 +23,12 @@
       "database_id": "a1ab2b45-b61a-49a9-8cb9-75d49d3e2668"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "RELEASES_BUCKET",
+      "bucket_name": "shreewin-releases"
+    }
+  ],
   "vars": {
     "ENVIRONMENT": "production",
     "MIN_PASSWORD_LENGTH": "8",
