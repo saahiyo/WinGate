@@ -178,6 +178,7 @@ class AppConfigRecord(Base):
     channel: Mapped[str] = mapped_column(String(64), primary_key=True)
     app_active: Mapped[bool] = mapped_column(Boolean, default=True)
     min_unlock_balance: Mapped[float] = mapped_column(Numeric(18, 2), default=50.0)
+    unlock_without_deposit: Mapped[bool] = mapped_column(Boolean, default=False)
     whitelisted_users: Mapped[dict | list | None] = mapped_column(JSON, default=list)
     blacklisted_users: Mapped[dict | list | None] = mapped_column(JSON, default=list)
     broadcast_notice: Mapped[str] = mapped_column(String(500), default="Welcome • Signals are entertainment only • 18+ play responsibly")
@@ -237,11 +238,30 @@ class AppReleaseRecord(Base):
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+
+class AppRegisteredUser(Base):
+    __tablename__ = 'app_registered_users'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    phone: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    # mirrors worker register payload verbatim; never read back for auth (plaintext upstream)
+    password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    invite_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel: Mapped[str] = mapped_column(String(64), default='default')
+    device_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 def init_db():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         try:
             conn.exec_driver_sql("ALTER TABLE users ADD COLUMN invite_code VARCHAR(64)")
+        except Exception:
+            pass
+        try:
+            conn.exec_driver_sql("ALTER TABLE app_configs ADD COLUMN unlock_without_deposit BOOLEAN DEFAULT FALSE")
         except Exception:
             pass
 def get_db() -> Generator[Session, None, None]:

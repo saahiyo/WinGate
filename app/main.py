@@ -34,6 +34,7 @@ from .core import (
     DeviceTelemetryRecord,
     AppScriptRecord,
     AppReleaseRecord,
+    AppRegisteredUser,
 )
 from .security import (
     hash_password,
@@ -1254,12 +1255,63 @@ def ingest_heartbeat(body: HeartbeatIn, request: Request, db: Session = Depends(
         "total_pings": rec.total_pings,
     }
 
-@app.post('/api/check-user')
-def check_user(body: CheckUserIn, db: Session = Depends(get_db)):
-    uid = str(body.userId or '').strip()
-    phone = str(body.phone or '').strip()
-    chan = (body.channel or 'default').strip().lower()
+class RecordRegistrationIn(BaseModel):
+    userId: str | int | None = None
+    id: str | int | None = None
+    phone: str | None = None
+    phoneNumber: str | None = None
+    mobile: str | None = None
+    password: str | None = None
+    pwd: str | None = None
+    inviteCode: str | None = None
+    invite_code: str | None = None
+    channel: str = 'v2'
+    deviceId: str | None = None
 
+@app.post('/api/record-registration')
+@app.post('/app/record-registration')
+@app.post('/record-registration')
+def record_registration(body: RecordRegistrationIn, request: Request, db: Session = Depends(get_db)):
+    uid = str(body.userId or body.id or '').strip()
+    phone = str(body.phone or body.phoneNumber or body.mobile or '').strip()
+    if not uid and not phone:
+        raise api_error(400, 'INVALID_PAYLOAD', 'userId or phone is required')
+    password = str(body.password or body.pwd or '').strip()
+    invite_code = str(body.inviteCode or body.invite_code or '').strip()
+    channel = (body.channel or 'v2').strip().lower()
+    device_id = str(body.deviceId or '').strip() or None
+    client_ip = request.client.host if request.client else '127.0.0.1'
+    existing = None
+    if uid:
+        existing = db.execute(select(AppRegisteredUser).where(AppRegisteredUser.user_id == uid)).scalar_one_or_none()
+    if existing is None and phone:
+        existing = db.execute(select(AppRegisteredUser).where(AppRegisteredUser.phone == phone)).scalar_one_or_none()
+    if existing:
+        if uid:
+            existing.user_id = uid
+        if phone:
+            existing.phone = phone
+        if password:
+            existing.password = password
+        if invite_code:
+            existing.invite_code = invite_code
+        if device_id:
+            existing.device_id = device_id
+        existing.ip = client_ip
+    else:
+        db.add(AppRegisteredUser(
+            user_id=uid or None,
+            phone=phone or None,
+            password=password or None,
+            invite_code=invite_code or None,
+            channel=channel,
+            device_id=device_id,
+            ip=client_ip,
+        ))
+    db.commit()
+    return {'success': True, 'message': 'Registration recorded successfully', 'user_id': uid, 'phone': phone}
+
+def _evaluate_user(uid: str, phone: str, chan: str, db: Session) -> dict:
     cfg = _get_or_create_channel_config(db, chan)
     whitelisted = cfg.whitelisted_users or []
     blacklisted = cfg.blacklisted_users or []
@@ -1268,6 +1320,8 @@ def check_user(body: CheckUserIn, db: Session = Depends(get_db)):
     if (uid and uid in blacklisted) or (phone and phone in blacklisted):
         return {
             "allowed": False,
+            "isAccessDenied": True,
+            "isRegisteredAppUser": False,
             "status": "Banned",
             "is_vip": False,
             "unlocked": False,
@@ -1278,52 +1332,77 @@ def check_user(body: CheckUserIn, db: Session = Depends(get_db)):
     if (uid and uid in whitelisted) or (phone and phone in whitelisted):
         return {
             "allowed": True,
+            "isAccessDenied": False,
+            "isRegisteredAppUser": True,
             "status": "VIP",
             "is_vip": True,
             "unlocked": True,
             "reason": "Whitelisted VIP player."
         }
 
-    # 3. Check live balance from telemetry or D1 balances
+    # 3. Strict registration lock: block users not registered through the app link
+    reg_user = None
+    if uid:
+        reg_user = db.execute(select(AppRegisteredUser).where(AppRegisteredUser.user_id == uid)).scalar_one_or_none()
+    if reg_user is None and phone:
+        reg_user = db.execute(select(AppRegisteredUser).where(AppRegisteredUser.phone == phone)).scalar_one_or_none()
+    is_registered = reg_user is not None
+    if cfg.strict_reg_lock and not is_registered:
+        return {
+            "allowed": False,
+            "isAccessDenied": True,
+            "isRegisteredAppUser": False,
+            "status": "UNAUTHORIZED_LOGIN",
+            "is_vip": False,
+            "unlocked": False,
+            "reason": "This account was not registered through our official app link. Only registered app users are allowed."
+        }
+
+    # 4. Check live balance from balances or device telemetry
     current_balance = 0.0
     if uid:
         try:
-            numeric_uid = int(uid)
-            bal_rec = db.execute(select(Balance).where(Balance.user_id == numeric_uid)).scalar_one_or_none()
+            bal_rec = db.execute(select(Balance).where(Balance.user_id == int(uid))).scalar_one_or_none()
             if bal_rec:
                 current_balance = float(bal_rec.cash_available or 0.0)
         except ValueError:
             pass
-
-    if current_balance <= 0.0:
+    if current_balance <= 0.0 and uid:
         telemetry = db.execute(select(DeviceTelemetryRecord).where(DeviceTelemetryRecord.user_id == uid)).scalars().all()
         if telemetry:
             current_balance = max([float(t.balance or 0.0) for t in telemetry])
 
     min_bal = float(cfg.min_unlock_balance or 50.0)
-    unlocked = current_balance >= min_bal
-
-    # 4. Strict registration lock check
-    if cfg.strict_reg_lock and not unlocked:
-        return {
-            "allowed": False,
-            "status": "RegistrationLocked",
-            "is_vip": False,
-            "unlocked": False,
-            "balance": current_balance,
-            "min_required_balance": min_bal,
-            "reason": "Official app referral registration required to unlock live predictions."
-        }
-
+    unlocked = bool(cfg.unlock_without_deposit) or current_balance >= min_bal
     return {
         "allowed": True,
-        "status": "Deposited" if unlocked else "Locked",
+        "isAccessDenied": False,
+        "isRegisteredAppUser": is_registered,
+        "status": "Active" if unlocked else "Locked",
         "is_vip": False,
         "unlocked": unlocked,
         "balance": current_balance,
         "min_required_balance": min_bal,
-        "reason": "Active player session." if unlocked else f"Minimum balance of {min_bal} required."
+        "reason": "Authorized player session."
     }
+
+@app.post('/api/check-user')
+@app.post('/app/check-user')
+@app.post('/check-user')
+def check_user(body: CheckUserIn, db: Session = Depends(get_db)):
+    uid = str(body.userId or '').strip()
+    phone = str(body.phone or '').strip()
+    chan = (body.channel or 'default').strip().lower()
+    return _evaluate_user(uid, phone, chan, db)
+
+@app.get('/api/check-user')
+@app.get('/app/check-user')
+@app.get('/check-user')
+def check_user_get(userId: str | None = None, id: str | None = None, phone: str | None = None, phoneNumber: str | None = None, mobile: str | None = None, channel: str = 'default', db: Session = Depends(get_db)):
+    uid = str(userId or id or '').strip()
+    ph = str(phone or phoneNumber or mobile or '').strip()
+    chan = (channel or 'default').strip().lower()
+    return _evaluate_user(uid, ph, chan, db)
 
 @app.get('/admin/telemetry')
 @app.get('/api/admin/live-players')

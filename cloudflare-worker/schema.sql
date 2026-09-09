@@ -203,4 +203,17 @@ CREATE TABLE IF NOT EXISTS app_releases (
 CREATE INDEX IF NOT EXISTS idx_releases_flavor ON app_releases(flavor);
 CREATE INDEX IF NOT EXISTS idx_releases_code ON app_releases(version_code);
 
+CREATE TABLE IF NOT EXISTS app_registered_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    phone TEXT,
+    password TEXT,
+    invite_code TEXT,
+    channel TEXT DEFAULT 'default',
+    device_id TEXT,
+    ip TEXT,
+    registered_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reg_users_user ON app_registered_users(user_id);
+CREATE INDEX IF NOT EXISTS idx_reg_users_phone ON app_registered_users(phone);
 

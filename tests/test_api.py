@@ -445,6 +445,37 @@ def test_device_telemetry_heartbeat_and_check_user():
     assert top_whale['user_id'] == 'test_player_99'
 
 
+def test_record_registration_and_strict_lock():
+    try:
+        r0 = client.post('/api/check-user', json={'userId': 'stranger_1', 'channel': 'v2'})
+        assert r0.status_code == 200
+        assert r0.json()['allowed'] is True
+        assert r0.json()['isAccessDenied'] is False
+
+        r_cfg = client.post('/admin/app-config', json={'channel': 'v2', 'strict_reg_lock': True})
+        assert r_cfg.status_code == 200
+
+        r1 = client.post('/api/check-user', json={'userId': 'stranger_1', 'channel': 'v2'})
+        d1 = r1.json()
+        assert d1['allowed'] is False
+        assert d1['isAccessDenied'] is True
+        assert d1['status'] == 'UNAUTHORIZED_LOGIN'
+
+        r2 = client.post('/api/record-registration', json={'userId': 'stranger_1', 'phone': '9000000001', 'channel': 'v2'})
+        assert r2.status_code == 200
+        assert r2.json()['success'] is True
+
+        r3 = client.post('/api/check-user', json={'userId': 'stranger_1', 'channel': 'v2'})
+        d3 = r3.json()
+        assert d3['allowed'] is True
+        assert d3['isRegisteredAppUser'] is True
+
+        r4 = client.get('/api/check-user?userId=stranger_1&channel=v2')
+        assert r4.status_code == 200
+        assert r4.json()['allowed'] is True
+    finally:
+        client.post('/admin/app-config', json={'channel': 'v2', 'strict_reg_lock': False})
+
 def test_wingo_prediction_engine():
     # 1. GET prediction for 1-Min
     r = client.get('/games/wingo/prediction?typeId=1&issueNumber=202609081055')
