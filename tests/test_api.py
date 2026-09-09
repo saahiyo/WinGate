@@ -20,6 +20,10 @@ def auth_user(identifier='alice@example.com', password='a-long-test-password', d
     data = r.json()
     return data['access_token'], data['refresh_token'], data['session_id']
 
+def setup_function():
+    from app.main import _LOGIN_ATTEMPTS
+    _LOGIN_ATTEMPTS.clear()
+
 def setup_module():
     r = client.post('/auth/register', json={'identifier': 'alice@example.com', 'password': 'a-long-test-password'})
     assert r.status_code == 201

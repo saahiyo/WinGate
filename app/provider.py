@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import secrets
@@ -27,7 +28,63 @@ def call_provider_api(endpoint: str, data: dict[str, Any] | None = None, token: 
     payload = sign_provider_payload(data or {})
     # ponytail: fixed fallback IP, pass client_ip when caller has the request; per-request IP if upstream enforces it
     ip = client_ip or '103.44.118.79'
-    headers = {
+    headers = _headers(ip, token)
+    
+    url = f'{settings.provider_api_url.rstrip("/")}{endpoint}'
+    try:
+        resp = _shared_sync_client().post(url, json=payload, headers=headers)
+        return resp.json()
+    except Exception as e:
+        return {'code': -1, 'msg': str(e), 'data': None}
+
+# ponytail: in-memory per-process TTL; shared cache service if multi-worker consistency matters
+_PUBLIC_TTL = {
+    '/api/webapi/GetTypeList': 3600,
+    '/api/webapi/GetTRXtypeList': 3600,
+    '/api/webapi/GetRuleByTypeId': 3600,
+    '/api/webapi/GetGameIssue': 2,
+    '/api/webapi/GetNoaverageEmerdList': 5,
+    '/api/webapi/GetLastFiveIssueNumberResult': 5,
+}
+_TTL_CACHE: dict[str, tuple[float, Any]] = {}
+_sync_client: httpx.Client | None = None
+_async_clients: dict[int, httpx.AsyncClient] = {}
+
+def _cache_key(endpoint: str, data: dict[str, Any] | None, token: str | None) -> str:
+    if token:
+        return ''
+    return endpoint + ':' + json.dumps(data or {}, sort_keys=True, separators=(',', ':'))
+
+def _cache_get(key: str) -> Any | None:
+    if not key:
+        return None
+    hit = _TTL_CACHE.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    _TTL_CACHE.pop(key, None)
+    return None
+
+def _cache_set(key: str, value: Any, ttl: int) -> None:
+    if key and ttl > 0:
+        _TTL_CACHE[key] = (time.time() + ttl, value)
+
+def _shared_sync_client() -> httpx.Client:
+    global _sync_client
+    if _sync_client is None:
+        _sync_client = httpx.Client(timeout=10.0)
+    return _sync_client
+
+async def _shared_async_client() -> httpx.AsyncClient:
+    # one client per running loop: TestClient portals each own a loop, sharing one breaks on loop close
+    key = id(asyncio.get_running_loop())
+    client = _async_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(timeout=10.0)
+        _async_clients[key] = client
+    return client
+
+def _headers(ip: str, token: str | None) -> dict[str, str]:
+    h = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Origin': settings.provider_origin,
         'Referer': settings.provider_origin.rstrip('/') + '/',
@@ -37,15 +94,26 @@ def call_provider_api(endpoint: str, data: dict[str, Any] | None = None, token: 
         'X-Forwarded-For': ip,
     }
     if token:
-        headers['Authorization'] = f'Bearer {token}'
-    
+        h['Authorization'] = f'Bearer {token}'
+    return h
+
+async def call_provider_api_async(endpoint: str, data: dict[str, Any] | None = None, token: str | None = None, client_ip: str | None = None) -> dict[str, Any]:
+    ttl = _PUBLIC_TTL.get(endpoint, 0)
+    key = _cache_key(endpoint, data, token)
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
+    payload = sign_provider_payload(data or {})
+    ip = client_ip or '103.44.118.79'
     url = f'{settings.provider_api_url.rstrip("/")}{endpoint}'
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, json=payload, headers=headers)
-            return resp.json()
+        client = await _shared_async_client()
+        resp = await client.post(url, json=payload, headers=_headers(ip, token))
+        out = resp.json()
     except Exception as e:
         return {'code': -1, 'msg': str(e), 'data': None}
+    _cache_set(key, out, ttl)
+    return out
 
 def parse_wingo_type_id(raw: Any) -> int:
     if not raw:

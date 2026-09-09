@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import secrets
 import hashlib
+import time
 
 from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +46,7 @@ from .security import (
 )
 from .provider import (
     call_provider_api,
+    call_provider_api_async,
     parse_wingo_type_id,
     enrich_wingo_result,
 )
@@ -141,8 +143,21 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
         'invite_code': user.invite_code,
     }
 
+# ponytail: in-memory per-process window, Redis if multi-worker limits matter
+_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+
+def _check_login_rate(ip: str) -> None:
+    now = time.time()
+    attempts = [t for t in _LOGIN_ATTEMPTS.get(ip, []) if now - t < 60.0]
+    if len(attempts) >= settings.login_rate_limit_per_minute:
+        raise api_error(429, 'RATE_LIMITED', 'Too many login attempts, try again later')
+    attempts.append(now)
+    _LOGIN_ATTEMPTS[ip] = attempts
+
+
 @app.post('/auth/login')
-def login(body: LoginIn, db: Session = Depends(get_db)):
+def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+    _check_login_rate(request.client.host if request.client else 'unknown')
     user = db.scalar(select(User).where(User.identifier == body.identifier.strip().lower()))
     if not user or not verify_password(body.password, user.password_hash):
         raise api_error(401, 'AUTH_REQUIRED', 'Invalid credentials')
@@ -797,9 +812,8 @@ class WingoHistoryIn(BaseModel):
     type_id: str | int | None = None
     page: int = 1
     size: int = 10
-
-def _get_wingo_issue_data(type_id: int):
-    resp = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_id})
+async def _get_wingo_issue_data(type_id: int):
+    resp = await call_provider_api_async('/api/webapi/GetGameIssue', {'typeId': type_id})
     if not resp or resp.get('code') != 0 or not resp.get('data'):
         raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch current WinGo round') if resp else 'Provider unavailable')
     d = resp['data']
@@ -822,10 +836,9 @@ def _get_wingo_issue_data(type_id: int):
         'interval_minutes': d.get('intervalM'),
         'countdown_seconds': remaining_seconds,
     }
-
-def _get_wingo_history_data(type_id: int, page: int, size: int):
+async def _get_wingo_history_data(type_id: int, page: int, size: int):
     page_size = min(50, max(1, size))
-    resp = call_provider_api('/api/webapi/GetNoaverageEmerdList', {
+    resp = await call_provider_api_async('/api/webapi/GetNoaverageEmerdList', {
         'typeId': type_id,
         'pageNo': page,
         'pageSize': page_size,
@@ -848,8 +861,8 @@ def _get_wingo_history_data(type_id: int, page: int, size: int):
 @app.get('/wingo/types')
 @app.post('/games/wingo/types')
 @app.post('/wingo/types')
-def wingo_types():
-    resp = call_provider_api('/api/webapi/GetTypeList', {})
+async def wingo_types():
+    resp = await call_provider_api_async('/api/webapi/GetTypeList', {})
     if not resp or resp.get('code') != 0 or not resp.get('data'):
         raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch WinGo game types') if resp else 'Provider unavailable')
     types = [
@@ -872,39 +885,39 @@ def wingo_types():
 
 @app.get('/games/wingo/issue')
 @app.get('/wingo/issue')
-def wingo_issue_get(type: str | None = None, type_id: str | None = None):
+async def wingo_issue_get(type: str | None = None, type_id: str | None = None):
     type_val = parse_wingo_type_id(type_id or type or 1)
-    return _get_wingo_issue_data(type_val)
+    return await _get_wingo_issue_data(type_val)
 
 @app.post('/games/wingo/issue')
 @app.post('/wingo/issue')
-def wingo_issue_post(body: WingoIssueIn | None = None):
+async def wingo_issue_post(body: WingoIssueIn | None = None):
     raw = body.type_id if body and body.type_id is not None else (body.type if body else 1)
     type_val = parse_wingo_type_id(raw or 1)
-    return _get_wingo_issue_data(type_val)
+    return await _get_wingo_issue_data(type_val)
 
 @app.get('/games/wingo/history')
 @app.get('/wingo/history')
-def wingo_history_get(type: str | None = None, type_id: str | None = None, page: int = 1, size: int = 10):
+async def wingo_history_get(type: str | None = None, type_id: str | None = None, page: int = 1, size: int = 10):
     type_val = parse_wingo_type_id(type_id or type or 1)
-    return _get_wingo_history_data(type_val, page, size)
+    return await _get_wingo_history_data(type_val, page, size)
 
 @app.post('/games/wingo/history')
 @app.post('/wingo/history')
-def wingo_history_post(body: WingoHistoryIn | None = None):
+async def wingo_history_post(body: WingoHistoryIn | None = None):
     raw = body.type_id if body and body.type_id is not None else (body.type if body else 1)
     type_val = parse_wingo_type_id(raw or 1)
     page = body.page if body else 1
     size = body.size if body else 10
-    return _get_wingo_history_data(type_val, page, size)
+    return await _get_wingo_history_data(type_val, page, size)
 
 @app.get('/games/wingo/recent-results')
 @app.get('/wingo/recent-results')
 @app.post('/games/wingo/recent-results')
 @app.post('/wingo/recent-results')
-def wingo_recent(type: str | None = None, type_id: str | None = None):
+async def wingo_recent(type: str | None = None, type_id: str | None = None):
     type_val = parse_wingo_type_id(type_id or type or 1)
-    resp = call_provider_api('/api/webapi/GetLastFiveIssueNumberResult', {'typeId': type_val})
+    resp = await call_provider_api_async('/api/webapi/GetLastFiveIssueNumberResult', {'typeId': type_val})
     if not resp or resp.get('code') != 0:
         raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch recent results') if resp else 'Provider unavailable')
     data = resp.get('data') or {}
@@ -919,9 +932,9 @@ def wingo_recent(type: str | None = None, type_id: str | None = None):
 @app.get('/wingo/rules')
 @app.post('/games/wingo/rules')
 @app.post('/wingo/rules')
-def wingo_rules(type: str | None = None, type_id: str | None = None):
+async def wingo_rules(type: str | None = None, type_id: str | None = None):
     type_val = parse_wingo_type_id(type_id or type or 1)
-    resp = call_provider_api('/api/webapi/GetRuleByTypeId', {'typeId': type_val})
+    resp = await call_provider_api_async('/api/webapi/GetRuleByTypeId', {'typeId': type_val})
     if not resp or resp.get('code') != 0:
         raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch WinGo rules') if resp else 'Provider unavailable')
     data = resp.get('data') or {}
@@ -936,8 +949,8 @@ def wingo_rules(type: str | None = None, type_id: str | None = None):
 @app.get('/wingo/trx/types')
 @app.post('/games/wingo/trx/types')
 @app.post('/wingo/trx/types')
-def wingo_trx_types():
-    resp = call_provider_api('/api/webapi/GetTRXtypeList', {})
+async def wingo_trx_types():
+    resp = await call_provider_api_async('/api/webapi/GetTRXtypeList', {})
     if not resp or resp.get('code') != 0 or not resp.get('data'):
         raise api_error(502, 'PROVIDER_UNAVAILABLE', resp.get('msg', 'Failed to fetch TRX WinGo types') if resp else 'Provider unavailable')
     types = [
@@ -967,7 +980,7 @@ async def wingo_live_stream(request: Request, type: str | None = None, type_id: 
         yield f"event: connected\ndata: {json.dumps({'status': 'live', 'type_id': type_val, 'connected_at': utcnow().isoformat()})}\n\n"
 
         # 2. Initial round snapshot
-        issue_resp = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_val})
+        issue_resp = await call_provider_api_async('/api/webapi/GetGameIssue', {'typeId': type_val})
         d = issue_resp.get('data') or {}
         current_issue = d.get('issueNumber')
         remaining_seconds = 60
@@ -993,8 +1006,8 @@ async def wingo_live_stream(request: Request, type: str | None = None, type_id: 
                 yield f"event: round_ended\ndata: {json.dumps({'type_id': type_val, 'issue_number': current_issue, 'ended_at': utcnow().isoformat()})}\n\n"
 
                 try:
-                    new_issue = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_val})
-                    history_resp = call_provider_api('/api/webapi/GetNoaverageEmerdList', {'typeId': type_val, 'pageNo': 1, 'pageSize': 1})
+                    new_issue = await call_provider_api_async('/api/webapi/GetGameIssue', {'typeId': type_val})
+                    history_resp = await call_provider_api_async('/api/webapi/GetNoaverageEmerdList', {'typeId': type_val, 'pageNo': 1, 'pageSize': 1})
 
                     if history_resp.get('data', {}).get('list'):
                         result_item = enrich_wingo_result(history_resp['data']['list'][0])
@@ -1371,7 +1384,7 @@ def get_admin_telemetry(channel: str = 'all', db: Session = Depends(get_db)):
 # Server-Authoritative WinGo Predictor & Trend Engine (/games/wingo/prediction)
 # ------------------------------------------------------------------------------
 
-def _generate_wingo_prediction(type_id: int, issue_number: str | None = None) -> dict:
+async def _generate_wingo_prediction(type_id: int, issue_number: str | None = None) -> dict:
     import hashlib
     type_names = {10: 'WinGo 30s', 1: 'WinGo 1-Min', 2: 'WinGo 3-Min', 3: 'WinGo 5-Min'}
     game_name = type_names.get(type_id, f'WinGo Type {type_id}')
@@ -1379,7 +1392,7 @@ def _generate_wingo_prediction(type_id: int, issue_number: str | None = None) ->
     current_issue = issue_number
     if not current_issue:
         try:
-            issue_resp = call_provider_api('/api/webapi/GetGameIssue', {'typeId': type_id})
+            issue_resp = await call_provider_api_async('/api/webapi/GetGameIssue', {'typeId': type_id})
             current_issue = issue_resp.get('data', {}).get('issueNumber')
         except Exception:
             pass
@@ -1389,7 +1402,7 @@ def _generate_wingo_prediction(type_id: int, issue_number: str | None = None) ->
     # Fetch recent history
     history = []
     try:
-        history_resp = call_provider_api('/api/webapi/GetNoaverageEmerdList', {'typeId': type_id, 'pageNo': 1, 'pageSize': 15})
+        history_resp = await call_provider_api_async('/api/webapi/GetNoaverageEmerdList', {'typeId': type_id, 'pageNo': 1, 'pageSize': 15})
         raw_list = history_resp.get('data', {}).get('list') or []
         history = [enrich_wingo_result(item) for item in raw_list]
     except Exception:
@@ -1468,7 +1481,7 @@ def _generate_wingo_prediction(type_id: int, issue_number: str | None = None) ->
 
 @app.get('/games/wingo/prediction')
 @app.get('/wingo/prediction')
-def wingo_prediction_get(
+async def wingo_prediction_get(
     type: str | None = None,
     type_id: str | None = None,
     typeId: str | None = None,
@@ -1478,15 +1491,15 @@ def wingo_prediction_get(
 ):
     type_val = parse_wingo_type_id(type_id or typeId or type or 1)
     target_issue = issue_number or issueNumber or issue
-    return _generate_wingo_prediction(type_val, target_issue)
+    return await _generate_wingo_prediction(type_val, target_issue)
 
 @app.post('/games/wingo/prediction')
 @app.post('/wingo/prediction')
-def wingo_prediction_post(body: WingoIssueIn | None = None):
+async def wingo_prediction_post(body: WingoIssueIn | None = None):
     raw = (body.type_id or body.typeId or body.type) if body else 1
     type_val = parse_wingo_type_id(raw or 1)
     target_issue = (body.issue_number or body.issueNumber or body.issue) if body else None
-    return _generate_wingo_prediction(type_val, target_issue)
+    return await _generate_wingo_prediction(type_val, target_issue)
 
 
 # ------------------------------------------------------------------------------

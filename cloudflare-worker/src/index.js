@@ -1,6 +1,17 @@
 // WinGate: Server-Authoritative State Authorization & Gaming Gateway
 // Identity & Upstream Provider Sync, Concurrency-Safe Balances, Game Leases & Public WinGo APIs
 
+// ponytail: per-isolate TTL; shared cache (KV) if multi-isolate consistency matters
+const PUBLIC_TTL_MS = {
+  '/api/webapi/GetTypeList': 3600_000,
+  '/api/webapi/GetTRXtypeList': 3600_000,
+  '/api/webapi/GetRuleByTypeId': 3600_000,
+  '/api/webapi/GetGameIssue': 2_000,
+  '/api/webapi/GetNoaverageEmerdList': 5_000,
+  '/api/webapi/GetLastFiveIssueNumberResult': 5_000,
+};
+const TTL_CACHE = new Map();
+
 export default {
   async fetch(request, env) {
     const corsHeaders = {
@@ -66,8 +77,13 @@ export default {
       return t;
     }
 
-    // Call upstream client provider API
+    // Call upstream client provider API (public reads served from TTL cache)
     async function callProviderApi(endpoint, data, token = null) {
+      const ttl = PUBLIC_TTL_MS[endpoint] || 0;
+      const key = token ? '' : endpoint + ':' + JSON.stringify(data || {});
+      const hit = key ? TTL_CACHE.get(key) : null;
+      if (hit && hit.expires > Date.now()) return hit.value;
+      if (hit) TTL_CACHE.delete(key);
       const signed = signProviderPayload(data);
       const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || '103.44.118.79';
       const headers = {
@@ -87,7 +103,9 @@ export default {
         headers,
         body: JSON.stringify(signed),
       });
-      return await resp.json().catch(() => ({}));
+      const out = await resp.json().catch(() => ({}));
+      if (key && ttl > 0) TTL_CACHE.set(key, { value: out, expires: Date.now() + ttl });
+      return out;
     }
 
     // Auth Middleware Helper
@@ -102,7 +120,11 @@ export default {
         return { error: err(401, 'AUTH_REQUIRED', 'Invalid or expired access token') };
       }
 
-      const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(Number(payload.sub)).first();
+      const [userRes, sessRes] = await env.DB.batch([
+        env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(Number(payload.sub)),
+        env.DB.prepare('SELECT * FROM auth_sessions WHERE id = ?').bind(payload.sid),
+      ]);
+      const user = (userRes.results || [])[0] || null;
       if (!user) {
         return { error: err(401, 'AUTH_REQUIRED', 'User not found') };
       }
@@ -110,13 +132,15 @@ export default {
         return { error: err(403, 'ACCOUNT_DISABLED', 'Account is disabled') };
       }
 
-      const sess = await env.DB.prepare('SELECT * FROM auth_sessions WHERE id = ?').bind(payload.sid).first();
+      const sess = (sessRes.results || [])[0] || null;
       if (!sess || sess.revoked_at || new Date(sess.expires_at).getTime() <= Date.now()) {
         return { error: err(401, 'AUTH_REVOKED', 'Session is revoked or expired') };
       }
 
-      await env.DB.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?')
-        .bind(nowIso(), sess.id).run();
+      if (!sess.last_seen_at || Date.now() - new Date(sess.last_seen_at).getTime() > 60_000) {
+        await env.DB.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?')
+          .bind(nowIso(), sess.id).run();
+      }
 
       return { user, sess, payload };
     }

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     game_session_ttl_seconds: int = 3600
     action_token_ttl_seconds: int = 60
     launch_ticket_ttl_seconds: int = 120
+    login_rate_limit_per_minute: int = 10
     idempotency_ttl_seconds: int = 86400
     cors_origins: str = 'http://localhost:3000'
     provider_api_url: str = 'https://api.shreewinapi.com'
